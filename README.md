@@ -25,8 +25,8 @@ use your own Echo VR PCVR install (build `goldmaster 631547`, `echovr.exe` times
 | Phase | State |
 | --- | --- |
 | 0. Runtime, Platform stand-in and launcher, tested on Windows + SteamVR | ✅ Echo starts, renders through OpenXR, logs in to echovrce, reaches the lobby menu (headless SteamVR test) |
-| 1. Frame recon and a D3D12 OpenXR test app under Proton + FEX on the Frame | next |
-| 2. Echo boots on the Frame | |
+| 1. Frame recon | ✅ |
+| 2. Echo boots on the Frame | ✅ runs on Proton 11 (ARM64) + FEX, 72 fps, logs in to echovrce. Six particle shaders that need double precision are skipped for now |
 | 3. Playable: controllers, audio and mic, matches | |
 | 4. Performance (render scale, settings, FEX/vkd3d tuning) | |
 | 5. One-click installer; Echo Arcade on the Frame | |

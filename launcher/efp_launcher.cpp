@@ -117,6 +117,46 @@ static bool MakePatchedCopy(const std::wstring& dir, std::wstring& error)
 	return true;
 }
 
+// Community patches to Echo's DLLs add code in the padding after an executable section's
+// declared size (pnsovr.dll's org-scoped ID at RVA 0x1f9500, past .text's VirtualSize of
+// 0x1f84e4). Windows maps the whole page executable and runs it; under Wine with FEX only
+// the declared size is code, and jumping there is an access violation. This widens each
+// executable section's VirtualSize to its raw data, when that ends before the next section.
+// Returns how many sections changed; the file is rewritten only then (backup: <name>.efp-orig).
+static int WidenExecutableSections(const std::wstring& path, bool backup)
+{
+	std::string image;
+	if (!ReadFile(path, image) || image.size() < 0x40 || image[0] != 'M' || image[1] != 'Z') return 0;
+	DWORD ntOffset = *(const DWORD*)&image[0x3C];
+	if (ntOffset + sizeof(IMAGE_NT_HEADERS64) > image.size()) return 0;
+	IMAGE_NT_HEADERS64* nt = (IMAGE_NT_HEADERS64*)&image[ntOffset];
+	if (nt->Signature != IMAGE_NT_SIGNATURE) return 0;
+	IMAGE_SECTION_HEADER* sections = IMAGE_FIRST_SECTION(nt);
+	WORD count = nt->FileHeader.NumberOfSections;
+	if ((char*)(sections + count) > image.data() + image.size()) return 0;
+	int changed = 0;
+	for (WORD i = 0; i < count; i++) {
+		IMAGE_SECTION_HEADER& s = sections[i];
+		if (!(s.Characteristics & IMAGE_SCN_MEM_EXECUTE) || s.SizeOfRawData <= s.Misc.VirtualSize) continue;
+		DWORD next = i + 1 < count ? sections[i + 1].VirtualAddress : nt->OptionalHeader.SizeOfImage;
+		if (s.VirtualAddress + s.SizeOfRawData > next) continue;
+		Log(L"%ls: section %.8hs size 0x%lx -> 0x%lx (code past its declared end)", path.c_str() + path.find_last_of(L'\\') + 1,
+		    (const char*)s.Name, s.Misc.VirtualSize, s.SizeOfRawData);
+		s.Misc.VirtualSize = s.SizeOfRawData;
+		changed++;
+	}
+	if (!changed) return 0;
+	if (backup && !Exists(path + L".efp-orig") && !CopyFileW(path.c_str(), (path + L".efp-orig").c_str(), TRUE)) return 0;
+	FILE* f = nullptr;
+	if (_wfopen_s(&f, path.c_str(), L"wb") || !f) {
+		Log(L"couldn't rewrite %ls", path.c_str());
+		return 0;
+	}
+	fwrite(image.data(), 1, image.size(), f);
+	fclose(f);
+	return changed;
+}
+
 // SteamVR's OpenXR manifest: %LOCALAPPDATA%\openvr\openvrpaths.vrpath names SteamVR's folder.
 static std::wstring SteamVRManifest()
 {
@@ -178,6 +218,12 @@ int wmain(int argc, wchar_t** argv)
 			return Fail(L"Couldn't make echovr_openxr.exe: " + error + L".", 4);
 	}
 
+	if (wineVersion) {
+		WidenExecutableSections(dir + L"echovr_openxr.exe", false);
+		for (const wchar_t* dll : { L"pnsovr.dll", L"pnsrad.dll", L"pnsradmatchmaking.dll", L"pnsradgameserver.dll", L"pnsdemo.dll" })
+			if (Exists(dir + dll)) WidenExecutableSections(dir + dll, true);
+	}
+
 	if (steamVR && !wineVersion) {
 		std::wstring manifest = SteamVRManifest();
 		if (manifest.empty())
@@ -198,7 +244,31 @@ int wmain(int argc, wchar_t** argv)
 	// pnsovr's imports load it before that: with EchoFrame\ first on PATH they find the same
 	// file (bin\win10 itself has none). It also keeps the Oculus app's copy out.
 	SetEnvironmentVariableW(L"LIBOVR_DLL_DIR", runtimeDir.c_str());
-	std::wstring path = runtimeDir;
+	std::wstring platformDir = runtimeDir;
+	if (wineVersion) {
+		// The Platform SDK loader ignores LIBOVR_DLL_DIR in an elevated process, and Wine's
+		// processes are. Its other folder is <Oculus Base>\Support\oculus-runtime\ from the
+		// registry: in this Wine prefix that becomes EchoFrame\, with the stand-in copied there.
+		platformDir = runtimeDir + L"Support\\oculus-runtime\\";
+		CreateDirectoryW((runtimeDir + L"Support").c_str(), nullptr);
+		CreateDirectoryW(platformDir.c_str(), nullptr);
+		if (!CopyFileW((runtimeDir + L"LibOVRPlatform64_1.dll").c_str(), (platformDir + L"LibOVRPlatform64_1.dll").c_str(), FALSE))
+			Log(L"warning: couldn't copy the Platform SDK stand-in to %ls (error %lu)", platformDir.c_str(), GetLastError());
+		// pnsovr opens the key in the 32-bit view (KEY_WOW64_32KEY); both views get it
+		LSTATUS rc = ERROR_SUCCESS;
+		for (REGSAM view : { KEY_WOW64_32KEY, KEY_WOW64_64KEY }) {
+			HKEY key;
+			LSTATUS r = RegCreateKeyExW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\Oculus VR, LLC\\Oculus", 0, nullptr, 0,
+			                            KEY_SET_VALUE | view, nullptr, &key, nullptr);
+			if (r == ERROR_SUCCESS) {
+				r = RegSetValueExW(key, L"Base", 0, REG_SZ, (const BYTE*)runtimeDir.c_str(), (DWORD)((runtimeDir.size() + 1) * sizeof(wchar_t)));
+				RegCloseKey(key);
+			}
+			if (r != ERROR_SUCCESS) rc = r;
+		}
+		Log(rc == ERROR_SUCCESS ? L"Oculus Base (this Wine prefix): %ls" : L"warning: couldn't set Oculus Base to %ls", runtimeDir.c_str());
+	}
+	std::wstring path = platformDir;
 	if (DWORD n = GetEnvironmentVariableW(L"PATH", nullptr, 0)) {
 		std::wstring old(n, L'\0');
 		old.resize(GetEnvironmentVariableW(L"PATH", &old[0], n));

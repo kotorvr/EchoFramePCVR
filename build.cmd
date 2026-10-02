@@ -58,6 +58,7 @@ set LIBS=%LIBS% Winmm.lib Shlwapi.lib Pathcch.lib user32.lib advapi32.lib ole32.
 
 rem stub shaders for GPUs without double precision (runtime\src\efp_fp64.cpp)
 fxc /nologo /T ps_5_0 /E main /Vn g_StubPS /Fh build\obj\stub_ps.h runtime\shaders\stub_ps.hlsl >nul || exit /b 1
+fxc /nologo /T vs_5_0 /E main /Vn g_StubVS /Fh build\obj\stub_vs.h runtime\shaders\stub_vs.hlsl >nul || exit /b 1
 fxc /nologo /T cs_5_0 /E main /Vn g_StubCS /Fh build\obj\stub_cs.h runtime\shaders\stub_cs.hlsl >nul || exit /b 1
 cl /nologo /c /MT /O2 /W1 %INC% %DEF% /Fobuild\obj\glad.obj %EXT%\glad\src\glad.c || exit /b 1
 cl /nologo /LD /MT /O2 /EHsc /std:c++17 /W1 /MP /FIchrono %INC% %DEF% /Fobuild\obj\ /Febuild\out\LibOVRRT64_1.dll %SRC% build\obj\glad.obj /link %LIBS% || exit /b 1

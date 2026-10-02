@@ -24,6 +24,7 @@ static wchar_t g_logPath[MAX_PATH];
 static float g_renderScale = 1.0f;
 static bool g_hmdCache = true;
 static char g_serial[24];
+static bool g_fp64Dump;
 
 static FILE* OpenInDir(const wchar_t* name, const wchar_t* mode)
 {
@@ -66,6 +67,22 @@ bool EFP_UnderWine()
 }
 
 float EFP_RenderScale() { return g_renderScale; }
+bool EFP_Fp64Dump() { return g_fp64Dump; }
+
+void EFP_DumpShader(const char* stage, uint64_t hash, const void* code, size_t size)
+{
+	wchar_t path[MAX_PATH];
+	swprintf_s(path, L"%lsshaders", g_dir);
+	CreateDirectoryW(path, nullptr);
+	swprintf_s(path, L"%lsshaders\\%hs_%016llx.dxbc", g_dir, stage, (unsigned long long)hash);
+	if (GetFileAttributesW(path) != INVALID_FILE_ATTRIBUTES)
+		return;
+	FILE* f = nullptr;
+	if (!_wfopen_s(&f, path, L"wb") && f) {
+		fwrite(code, 1, size, f);
+		fclose(f);
+	}
+}
 
 // Echo reports the headset's serial number when it logs in. OpenXR has none, so unless
 // echoframe.ini sets one, it's "EFP" and 12 hex digits made from this machine's (or Wine
@@ -100,6 +117,8 @@ static void ReadSettings()
 		}
 		else if (!_stricmp(key, "HmdCache"))
 			g_hmdCache = atoi(value) != 0;
+		else if (!_stricmp(key, "Fp64Dump"))
+			g_fp64Dump = atoi(value) != 0;
 		else if (!_stricmp(key, "HmdSerial"))
 			strncpy_s(g_serial, value, _TRUNCATE);
 	}

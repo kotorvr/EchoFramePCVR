@@ -61,6 +61,18 @@ Findings, phase by phase. Newest at the bottom of each section.
   - The runtime now hooks `CreateGraphicsPipelineState`, `CreateComputePipelineState` and `CreatePipelineState` (vtable slots 10, 11, 47). When the device reports no double precision, it swaps a pixel or compute shader whose SFI0 flags declare doubles for a stub (`runtime/shaders`).
 - **Stuck sessions.** After a crash, Echo's BugSplat reporter (`BsSndRpt64.exe`) keeps the Steam session open, and Steam won't start the shortcut again. `frame.py stop` ends the session.
 
+- **FP64, round two.** The double-precision shaders are vertex shaders: six DXIL (SM6) particle-style vertex shaders, e.g. `f0fcc10513a97272` (99 KB).
+  - The doubles come from a compiler quirk: `uitofp i1 -> double`, `fabs`, `fcmp une 0.0`, which is just the bool.
+  - For now each one is replaced by a stub vertex shader that outputs w = 0, so the draw is clipped away. The pixel shader is stubbed too, because vkd3d-proton checks that VS outputs match PS inputs.
+  - Those effects don't show. The proper fix is demoting doubles to floats in dxil-spirv / vkd3d-proton.
+- **Platform SDK on Wine.** pnsovr's Platform SDK loader ignores `LIBOVR_DLL_DIR` in an elevated process (it checks the token's integrity level), and Wine's processes are elevated. It then only tries `<Oculus Base>\Support\oculus-runtime\`, read from `HKLM\SOFTWARE\Oculus VR, LLC\Oculus` `Base` in the 32-bit registry view (`KEY_WOW64_32KEY`).
+  - Under Wine the launcher writes `Base` = `EchoFrame\` to both views in the prefix.
+  - It copies the stand-in to `EchoFrame\Support\oculus-runtime\` and puts that folder first on PATH.
+- **Code past a section's end.** The community patches to `pnsovr.dll` and the others put code in the padding after `.text`'s VirtualSize (pnsovr's org-scoped ID at RVA 0x1f9500). Windows runs it; under Wine/FEX, jumping there is an access violation (execute).
+  - Under Wine the launcher widens each executable section's VirtualSize to its raw size: in `echovr_openxr.exe` and the `pns*.dll` files, keeping `<dll>.efp-orig` backups.
+- **Result.** Echo VR PCVR runs on the Steam Frame: OpenXR session through wineopenxr, frames at 72.0 fps (72 Hz, 1728×1728 per eye, slowest frame about 16 ms once loaded), login to echovrce (`[SOCIALGROUPS] active group = Echo VR Lounge`).
+- **`frame.py stop`.** `pkill -f` matched its own adb shell (its command line contains the pattern) and killed it before the real targets. Patterns are now written `[A]ppId=...`.
+
 Known before testing, from Proton#10211 and CircuitLord TF2VR #45 (SteamOS "vr" 20260928, Proton Experimental ARM64 11.0-20260924, SteamVR/OpenXR 2.18.1):
 
 - x86-64 Windows OpenXR apps work through wineopenxr, once the x86-64 MSVC runtime isn't loaded from the prefix's `system32`.

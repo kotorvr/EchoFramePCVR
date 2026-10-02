@@ -6,6 +6,7 @@
   frame.py install                    copies build/out/ to it and sets up the Steam shortcut
   frame.py launch                     starts Echo on the Frame (stopping a running one first)
   frame.py stop                       ends Echo's session (Echo, its crash reporter, Wine)
+  frame.py wait [SECONDS]             follows a launch until frames flow, Echo crashes or exits
   frame.py logs                       pulls every log into artifacts/logs/<time>/
   frame.py shell CMD...               runs a command in the Frame's shell
 
@@ -193,9 +194,10 @@ def stop():
     shortcut = sh(f"cat '{remote_path(STATE)}/shortcut.id' 2>/dev/null", check=False).strip()
     if not shortcut.isdigit():
         return
-    sh(f"pkill -f 'reaper SteamLaunch AppId={shortcut} ' ; pkill -9 -f BsSndRpt64.exe; pkill -9 -f echovr_openxr.exe; "
-       f"for i in 1 2 3 4 5 6 7 8 9 10; do pgrep -f 'AppId={shortcut} ' >/dev/null || break; sleep 1; done; "
-       f"pkill -9 -f 'AppId={shortcut} '", check=False)
+    # SIGKILL (Wine's processes outlived SIGTERM). The [x] in each pattern keeps pkill -f from
+    # matching this shell's own command line, which contains the patterns.
+    sh(f"pkill -9 -f '[B]sSndRpt64.exe'; pkill -9 -f '[e]chovr_openxr.exe'; pkill -9 -f '[E]choFrame.exe'; "
+       f"pkill -9 -f '[A]ppId={shortcut} '; sleep 2", check=False)
 
 
 def cmd_stop(args):
@@ -207,8 +209,51 @@ def cmd_launch(args):
     stop()
     throttle_off()
     gid = game_id()
-    sh(f"nohup steam steam://rungameid/{gid} >/dev/null 2>&1 &")
+    sh(f"date +%s > '{remote_path(STATE)}/launched'; nohup steam steam://rungameid/{gid} >/dev/null 2>&1 &")
     print(f"started game {gid}; logs with: frame.py logs")
+
+
+WAIT_PROBE = r'''
+R="{root}/bin/win10/EchoFrame"; L=$(ls -t "{root}/_local/r14logs/"* 2>/dev/null | head -1)
+echo "start=$(stat -c %Y "$R/runtime.log" 2>/dev/null || echo 0)"
+echo "frames=$(grep -c 'frames: [0-9]' "$R/runtime.log" 2>/dev/null)"
+echo "crash=$(grep -c 'Crash detected' "$L" 2>/dev/null)"
+echo "log=$(stat -c %Y "$L" 2>/dev/null || echo 0)"
+echo "running=$(pgrep -f echovr_openxr.exe >/dev/null && echo 1 || echo 0)"
+'''
+
+
+def probe(root):
+    out = dict(l.split("=", 1) for l in sh(WAIT_PROBE.format(root=root), check=False).split() if "=" in l)
+    return {k: int(v) if v.strip().isdigit() else 0 for k, v in out.items()}
+
+
+def cmd_wait(args):
+    """Follows the last launch (frame.py launch records when it started)."""
+    root = remote_path(ROOT)
+    limit = int(args[0]) if args else 300
+    launched = sh(f"cat '{remote_path(STATE)}/launched' 2>/dev/null", check=False).strip()
+    since = int(launched) if launched.isdigit() else int(sh("date +%s").strip())
+    start = time.time()
+    state = "timeout"
+    while time.time() - start < limit:
+        p = probe(root)
+        if p.get("start", 0) >= since:
+            if p.get("frames", 0) >= 2:
+                state = "frames"
+                break
+            if p.get("crash", 0) and p.get("log", 0) >= since:
+                state = "crash"
+                break
+            if not p.get("running") and time.time() - start > 20:
+                state = "exited"
+                break
+        time.sleep(5)
+    print(f"== {state} after {int(time.time() - start)} s")
+    print(sh(f"grep -v -e '  extension:' -e 'runtime offers' '{root}/bin/win10/EchoFrame/runtime.log' | tail -n 25 | cut -c1-200; "
+             f"echo '-- platform'; head -6 '{root}/bin/win10/EchoFrame/Support/oculus-runtime/platform.log' 2>/dev/null; "
+             f"echo '-- echo'; L=$(ls -t '{root}/_local/r14logs/'* | head -1); "
+             f"grep -v -i -E 'password|token|Resetting player|Memory|GPU Memory' \"$L\" | tail -n 8 | cut -c1-170", check=False))
 
 
 def cmd_logs(args):
@@ -218,7 +263,7 @@ def cmd_logs(args):
     os.makedirs(dest, exist_ok=True)
     gid = game_id()
     files = [f"{root}/bin/win10/EchoFrame/launcher.log", f"{root}/bin/win10/EchoFrame/runtime.log",
-             f"{root}/bin/win10/EchoFrame/platform.log", f"{root}/bin/win10/EchoFrame/hmd_cache.txt",
+             f"{root}/bin/win10/EchoFrame/Support/oculus-runtime/platform.log", f"{root}/bin/win10/EchoFrame/hmd_cache.txt",
              f"{home}/steam-{gid}.log"]
     newest = sh(f"ls -t '{root}/_local/r14logs/' 2>/dev/null | head -1", check=False).strip()
     if newest:
@@ -242,7 +287,7 @@ def main():
         print(__doc__)
         return
     commands = {"recon": cmd_recon, "push-game": cmd_push_game, "install": cmd_install,
-                "launch": cmd_launch, "stop": cmd_stop, "logs": cmd_logs, "shell": cmd_shell}
+                "launch": cmd_launch, "stop": cmd_stop, "wait": cmd_wait, "logs": cmd_logs, "shell": cmd_shell}
     if sys.argv[1] not in commands:
         sys.exit(f"unknown command {sys.argv[1]}")
     SERIAL = find_frame()

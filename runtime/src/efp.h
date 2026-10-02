@@ -14,6 +14,8 @@ bool EFP_UnderWine();
 float EFP_RenderScale();     // RenderScale = 1.0: multiplies the eye texture size Echo is given
 bool EFP_UseHmdCache();      // HmdCache = 1: start from hmd_cache.txt instead of a temporary session
 const char* EFP_HmdSerial(); // HmdSerial = ...: the headset serial number Echo reports (default: made per machine)
+bool EFP_Fp64Dump();         // Fp64Dump = 1: save the shaders that use double precision (EchoFrame/shaders)
+void EFP_DumpShader(const char* stage, uint64_t hash, const void* code, size_t size);
 
 // What a temporary OpenXR session would tell us before Echo has made its own: the
 // per-eye field of view and eye poses, and the play-area size. Saved once a session
