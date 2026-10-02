@@ -9,6 +9,10 @@
                                       extra environment variables and arguments (e.g. TU_DEBUG=sysmem)
   frame.py join SPARK_LINK            starts Echo straight into an echovrce session from the Discord
                                       bot's /create (private arena, combat or social lobby)
+  frame.py offline [lobby|arena] [KEY=VALUE...]
+                                      starts Echo in an offline session of its own (no server, no other
+                                      players; survives restarts, for repeatable tests). Needs EchoLoader's
+                                      dbgcore.dll and the EchoRelay patch in bin/win10 (see FRAME-NOTES)
   frame.py refresh [HZ]               shows or sets Echo's display rate (72, 80, 90, 96, 100, 120)
   frame.py stop                       ends Echo's session (Echo, its crash reporter, Wine)
   frame.py graphics [KEY=VALUE...]    shows or sets Echo's graphics settings on the Frame (Echo stopped);
@@ -299,10 +303,10 @@ def cmd_stop(args):
 
 def keep_awake():
     """The Frame suspends (and drops off Wi-Fi) when nobody wears it for a while, which ends any
-    unattended test run. A logind block inhibitor for six hours keeps it up; launches renew it."""
+    unattended test run. A logind idle inhibitor for six hours (a sleep inhibitor needs authentication) is meant to keep it up; launches renew it."""
     sh(f"touch {TUDEBUG_FILE}; "   # Turnip watches it only if it exists at the start
-       "pgrep -f '[s]ystemd-inhibit --what=sleep:idle --who=EchoFramePCVR' >/dev/null || "
-       "nohup systemd-inhibit --what=sleep:idle --who=EchoFramePCVR --why='Echo tests' --mode=block "
+       "pgrep -f '[s]ystemd-inhibit --what=idle --who=EchoFramePCVR' >/dev/null || "
+       "nohup systemd-inhibit --what=idle --who=EchoFramePCVR --why='Echo tests' --mode=block "
        "sleep 21600 >/dev/null 2>&1 &", check=False)
 
 
@@ -333,6 +337,22 @@ def cmd_join(args):
     env = [a for a in args if "=" in a and not a.startswith("-") and "://" not in a]
     cmd_launch(env + ["-lobbyid", ids[0].upper()])
     print(f"joining echovrce session {ids[0].upper()}")
+
+
+# Offline sessions come from the EchoRelay patch (-offline), loaded by EchoLoader: Echo loads
+# <exe dir>/dbgcore.dll for its symbol handler, and Wine only takes the app's copy over its own
+# with the override. Neither is part of this repo; they come from the user's own Echo install.
+OFFLINE = {"lobby": ["-level", "mpl_lobby_b2", "-gametype", "Social_2.0_Private"],
+           "arena": ["-level", "mpl_arena_a", "-gametype", "Echo_Arena_Private"]}
+
+
+def cmd_offline(args):
+    kind = args[0] if args and args[0] in OFFLINE else "lobby"
+    env = [a for a in args if "=" in a and not a.startswith("-")]
+    if "yes" not in sh(f"[ -f '{remote_path(BIN)}/plugins/dbgcore.dll' ] && echo yes", check=False):
+        sys.exit("no EchoRelay patch on the Frame (bin/win10/plugins/dbgcore.dll): see FRAME-NOTES")
+    cmd_launch(env + ["WINEDLLOVERRIDES=dbgcore=n,b", "-offline", *OFFLINE[kind], "-region", "uscn"])
+    print(f"offline {kind}")
 
 
 WAIT_PROBE = r'''
@@ -408,7 +428,12 @@ def cmd_graphics(args):
         if "=" in a:
             k, v = a.split("=", 1)
             changes[k] = json.loads(v) if v not in ("true", "false") else v == "true"
-    graphics.update(changes)
+    for k, v in changes.items():   # "quality.fx=3" sets graphics.quality.fx
+        target = graphics
+        *parents, leaf = k.split(".")
+        for part in parents:
+            target = target.setdefault(part, {})
+        target[leaf] = v
     local = os.path.join(REPO, "artifacts", "settings_mp_v2.json")
     os.makedirs(os.path.dirname(local), exist_ok=True)
     with open(local, "w", encoding="utf-8", newline="\n") as f:
@@ -470,7 +495,7 @@ def main():
         print(__doc__)
         return
     commands = {"recon": cmd_recon, "push-game": cmd_push_game, "install": cmd_install,
-                "launch": cmd_launch, "join": cmd_join, "refresh": cmd_refresh, "stop": cmd_stop, "wait": cmd_wait, "graphics": cmd_graphics, "ini": cmd_ini, "tudebug": cmd_tudebug, "timing": cmd_timing, "logs": cmd_logs, "shell": cmd_shell}
+                "launch": cmd_launch, "join": cmd_join, "offline": cmd_offline, "refresh": cmd_refresh, "stop": cmd_stop, "wait": cmd_wait, "graphics": cmd_graphics, "ini": cmd_ini, "tudebug": cmd_tudebug, "timing": cmd_timing, "logs": cmd_logs, "shell": cmd_shell}
     if sys.argv[1] not in commands:
         sys.exit(f"unknown command {sys.argv[1]}")
     SERIAL = find_frame()

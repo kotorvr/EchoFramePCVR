@@ -1,14 +1,19 @@
 #!/usr/bin/env python3
 """Unattended A/B of Echo settings in an echovrce session, judged by runtime.log's frame timing.
 
-  ab_lobby.py SESSION_ID CONFIG [CONFIG...]
+  ab_lobby.py SESSION CONFIG [CONFIG...]
+
+SESSION is an echovrce session id (frame.py join), or offline-lobby / offline-arena for an
+offline session of Echo's own (frame.py offline): no other players, the same scene every time.
 
 Each CONFIG is NAME:item|item|... where an item is
   env:KEY=VALUE      environment variable for Echo (e.g. env:FDM_DEBUG=enable)
   ini:KEY=VALUE      the runtime's echoframe.ini (e.g. ini:Foveation=0, ini:RenderScale=0.8)
   gfx:KEY=VALUE      Echo's graphics settings (e.g. gfx:temporalaa=false)
-  live:KEY=VALUE     echoframe.ini change made halfway through the run (e.g. live:Foveation=0,
-                     live:Poke=20AFBC8:f:4.0)
+  live:KEY=VALUE     echoframe.ini change made after the first measurement, then measured again
+                     (e.g. live:Foveation=0, live:Poke=20AFBC8:f:4.0); several live items are
+                     applied one after another, each measured with the ones before it
+  tu:FLAGS           Turnip debug flags written live, as a step like live (e.g. tu:nolrz)
 For every config Echo is restarted into the session (frame.py join), the run waits until the
 player has spawned plus SETTLE seconds, then averages the GPU/fps lines of the next MEASURE
 seconds. ini and gfx changes are undone after each config. Results are appended to
@@ -62,10 +67,10 @@ def window(start, end):
 
 
 def run(session, name, items, out):
-    env, ini, gfx, live = [], {}, {}, {}
+    env, ini, gfx, live = [], {}, {}, []
     for it in items:
         kind, kv = it.split(":", 1)
-        k, v = kv.split("=", 1)
+        k, v = kv.split("=", 1) if "=" in kv else (kv, "")
         if kind == "env":
             env.append(kv)
         elif kind == "ini":
@@ -73,14 +78,19 @@ def run(session, name, items, out):
         elif kind == "gfx":
             gfx[k] = v
         elif kind == "live":
-            live[k] = v
+            live.append(("ini", kv))
+        elif kind == "tu":
+            live.append(("tu", kv))
     frame.stop()
     frame.cmd_ini([f"{k}={v}" for k, v in {**DEFAULT_INI, **ini}.items()])
     settings = frame.settings_path()
     if gfx:
         frame.sh(f"cp '{settings}' '{settings}.ab-orig'")
         frame.cmd_graphics([f"{k}={v}" for k, v in gfx.items()])
-    frame.cmd_join([session] + env)
+    if session.startswith("offline-"):
+        frame.cmd_offline([session[len("offline-"):]] + env)
+    else:
+        frame.cmd_join([session] + env)
     t0 = time.time()
     ok = False
     while time.time() - t0 < 240:
@@ -101,14 +111,19 @@ def run(session, name, items, out):
         r = window(a, frame_now())
         result.append(f"{name}: " + (f"gpu {r['gpu']:.1f} ms (p95 {r['p95']:.1f}), {r['fps']:.1f} fps, display {r['hz']:.0f} Hz, "
                                      f"slowest {r['slowest']:.0f} ms ({r['n']} lines)" if r else "no timing lines"))
-        if live:
-            frame.cmd_ini([f"{k}={v}" for k, v in live.items()])
+        for kind, kv in live:
+            if kind == "tu":
+                frame.cmd_tudebug([kv])
+            else:
+                frame.cmd_ini([kv])
             time.sleep(12)
             a = frame_now()
             time.sleep(MEASURE + 2)
             r = window(a, frame_now())
-            result.append(f"{name} + live {live}: " + (f"gpu {r['gpu']:.1f} ms (p95 {r['p95']:.1f}), {r['fps']:.1f} fps, "
-                                                        f"display {r['hz']:.0f} Hz ({r['n']} lines)" if r else "no timing lines"))
+            result.append(f"{name} + {kind} {kv}: " + (f"gpu {r['gpu']:.1f} ms (p95 {r['p95']:.1f}), {r['fps']:.1f} fps, "
+                                                     f"display {r['hz']:.0f} Hz ({r['n']} lines)" if r else "no timing lines"))
+        if any(kind == "tu" for kind, _ in live):
+            frame.cmd_tudebug([""])
     frame.stop()
     if gfx:   # Echo's settings as they were
         frame.sh(f"cp '{settings}.ab-orig' '{settings}'")
