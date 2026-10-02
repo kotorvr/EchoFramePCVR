@@ -455,13 +455,14 @@ def cmd_ini(args):
 
 
 # The 90 Hz profile, from the offline-lobby A/Bs (docs/FRAME-NOTES.md, 2026-10-02 night):
-# RenderScale 0.7 + Foveation 3 + TAA and sharpening off + particle/light quality masks 0 +
-# mesh LOD distance x50 held 90.0 fps at 9.5 ms GPU; Echo's mobile feature strip (Patch) and
-# the masks cost nothing to keep. "default" goes back to Echo's own look.
+# RenderScale 0.7 + Foveation 3 + TAA and sharpening off + particle/light quality masks 0
+# (about 12 ms GPU in the lobby). The mesh LOD distance (0x20AFBC8...) is left alone: x50 held
+# 90 fps but also stops distant parts of the lobby being drawn until you're close.
+# "default" goes back to Echo's own look.
 PROFILES = {
     "90": {"graphics": {"temporalaa": False, "sharpening": 0, "qualitylevel": 0},
            "ini": {"RenderScale": "0.7", "Foveation": "3", "Patch": "5863F7:7434:9090",
-                   "Poke": "20AFB84:i:0,20AFB80:i:0,20AFBC8:f:50.0,20AFBD0:f:50.0,20AFBD4:f:100.0"}},
+                   "Poke": "20AFB84:i:0,20AFB80:i:0"}},
     "default": {"graphics": {"temporalaa": True, "sharpening": 2.0, "qualitylevel": 1},
                 "ini": {"RenderScale": "1.0", "Foveation": "2", "Patch": "", "Poke": ""}},
 }
