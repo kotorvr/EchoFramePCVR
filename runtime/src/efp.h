@@ -48,5 +48,14 @@ bool EFP_DemoteDxilDoubles(const void* code, size_t size, std::vector<uint8_t>& 
 #endif
 void EFP_InstallFp64Workaround(ID3D12Device* device);
 
-// Frame pacing summary in runtime.log, every 10 s while frames are submitted.
-void EFP_FrameSubmitted(int64_t predictedDisplayPeriodNs);
+// Frame timing summary in runtime.log, every 10 s while frames are submitted (efp_timing.cpp).
+// GPU time comes from timestamp queries on the game's D3D12 queue.
+bool EFP_FrameTiming();      // FrameTiming = 1: measure GPU time (CPU timing is always on)
+struct ID3D12CommandQueue;
+void EFP_TimingStart(ID3D12CommandQueue* queue);   // the D3D12 session is created on this queue
+void EFP_TimingStop();                             // before the session (and maybe the queue) goes
+void EFP_TimingWaitFrame(bool returned);           // around xrWaitFrame
+void EFP_TimingBeginFrame(long long frameIndex);   // after xrBeginFrame
+void EFP_TimingCommit(double waitedMs);            // time in xrWaitSwapchainImage
+void EFP_TimingEndFrame(long long frameIndex);     // just before xrEndFrame
+void EFP_TimingFrameSubmitted(int64_t predictedDisplayPeriodNs);   // after xrEndFrame

@@ -194,9 +194,12 @@ int wmain(int argc, wchar_t** argv)
 	std::wstring args;
 	for (int i = 1; i < argc; i++) {
 		if (!wcscmp(argv[i], L"--steamvr")) { steamVR = true; continue; }
-		args += L" \"";
+		// Echo's parser takes a quoted "mpl_lobby_b2" for no value at all ("Wrong number of
+		// parameters passed to -level (0)"), so only arguments with spaces are quoted
+		bool quote = !*argv[i] || wcspbrk(argv[i], L" \t");
+		args += quote ? L" \"" : L" ";
 		args += argv[i];
-		args += L"\"";
+		if (quote) args += L"\"";
 	}
 
 	Log(L"EchoFrame launcher");

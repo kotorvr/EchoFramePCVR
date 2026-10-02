@@ -19,10 +19,10 @@ index 6baac79..4594a7f 100644
  
  #define CHK_OVR(x) \
 diff --git a/ReviveXR/InputManager.cpp b/ReviveXR/InputManager.cpp
-index e6d5524..70b0c1f 100644
+index e6d5524..cd68e1e 100644
 --- a/ReviveXR/InputManager.cpp
 +++ b/ReviveXR/InputManager.cpp
-@@ -30,17 +30,40 @@ InputManager::InputManager(XrInstance instance)
+@@ -30,17 +30,63 @@ InputManager::InputManager(XrInstance instance)
  	{
  		device->GetActiveSets(m_ActionSets);
  
@@ -56,6 +56,29 @@ index e6d5524..70b0c1f 100644
 +			char name[XR_MAX_PATH_LENGTH] = "";
 +			uint32_t length = 0;
 +			xrPathToString(instance, profile, sizeof(name), &length, name);
++			if (XR_FAILED(rs) && bindings.size() > 1)
++			{
++				// One unsupported path rejects the whole profile: find the ones the runtime
++				// takes (each suggestion replaces the last) and suggest those.
++				std::vector<XrActionSuggestedBinding> accepted;
++				for (const XrActionSuggestedBinding& binding : bindings)
++				{
++					suggestedBinding.countSuggestedBindings = 1;
++					suggestedBinding.suggestedBindings = &binding;
++					if (XR_SUCCEEDED(xrSuggestInteractionProfileBindings(instance, &suggestedBinding)))
++						accepted.push_back(binding);
++					else
++					{
++						char path[XR_MAX_PATH_LENGTH] = "";
++						xrPathToString(instance, binding.binding, sizeof(path), &length, path);
++						EFP_Log("bindings for %s: %s rejected, left out", name, path);
++					}
++				}
++				suggestedBinding.countSuggestedBindings = (uint32_t)accepted.size();
++				suggestedBinding.suggestedBindings = accepted.data();
++				if (!accepted.empty())
++					rs = xrSuggestInteractionProfileBindings(instance, &suggestedBinding);
++			}
 +			EFP_Log("bindings suggested for %s: %s", name, XR_SUCCEEDED(rs) ? "ok" : "rejected");
 +		}
 +	}
@@ -74,7 +97,7 @@ index e6d5524..70b0c1f 100644
  	}
  }
  
-@@ -435,20 +458,28 @@ void InputManager::OculusTouch::UpdateHaptics(XrSession session, XrDuration disp
+@@ -435,20 +481,78 @@ void InputManager::OculusTouch::UpdateHaptics(XrSession session, XrDuration disp
  	}
  }
  
@@ -83,17 +106,67 @@ index e6d5524..70b0c1f 100644
  {
  	std::string prefixes[ovrHand_Count] = { "/user/hand/left", "/user/hand/right" };
  
-+	// EchoFramePCVR: layout 0 is the runtime's preferred profile (as before), layout 1 adds
-+	// Touch after Index on SteamVR.
++	// EchoFramePCVR: the profiles, in the order they're suggested: the Steam Frame's own when
++	// the runtime has it, then the runtime's preferred one (as before), then Touch after
++	// Index on SteamVR.
++	enum Profile { FrameProfile, IndexProfile, WmrProfile, TouchProfile };
 +	const bool steamVR = Runtime::Get().UseHack(Runtime::HACK_VALVE_INDEX_PROFILE);
-+	if (layout > 1 || (layout == 1 && !steamVR))
++	std::vector<Profile> profiles;
++	if (Runtime::Get().Supports("XR_VALVE_frame_controller_interaction"))
++		profiles.push_back(FrameProfile);
++	if (steamVR)
++		profiles.insert(profiles.end(), { IndexProfile, TouchProfile });
++	else if (Runtime::Get().UseHack(Runtime::HACK_WMR_PROFILE))
++		profiles.push_back(WmrProfile);
++	else
++		profiles.push_back(TouchProfile);
++	if (layout >= (int)profiles.size())
 +		return XR_NULL_PATH;
-+	const bool indexProfile = steamVR && layout == 0;
-+	const bool wmrProfile = Runtime::Get().UseHack(Runtime::HACK_WMR_PROFILE) && layout == 0;
++	const bool indexProfile = profiles[layout] == IndexProfile;
++	const bool wmrProfile = profiles[layout] == WmrProfile;
 +
  #define ADD_BINDING(action, path) outBindings.push_back(XrActionSuggestedBinding{ action, GetXrPath(path) })
  
 -	if (Runtime::Get().UseHack(Runtime::HACK_WMR_PROFILE))
++	// The Steam Frame's controllers: the right one has A, B, X and Y as a diamond (A at the
++	// bottom, Y at the top), the left one a d-pad in the same places and a View button.
++	// Touch's X and Y (left) come from the d-pad's lower and upper halves, A and B (right) from
++	// the diamond's, and the Menu button from View. The right Menu and System buttons stay
++	// SteamVR's (its dashboard), like the Oculus button on Touch.
++	if (profiles[layout] == FrameProfile)
++	{
++		ADD_BINDING(m_Button_Enter, "/user/hand/left/input/view/click");
++		ADD_BINDING(m_Button_AX, "/user/hand/left/input/dpad_down/click");
++		ADD_BINDING(m_Button_AX, "/user/hand/left/input/dpad_left/click");
++		ADD_BINDING(m_Button_BY, "/user/hand/left/input/dpad_up/click");
++		ADD_BINDING(m_Button_BY, "/user/hand/left/input/dpad_right/click");
++		ADD_BINDING(m_Touch_AX, "/user/hand/left/input/dpad_down/touch");
++		ADD_BINDING(m_Touch_AX, "/user/hand/left/input/dpad_left/touch");
++		ADD_BINDING(m_Touch_BY, "/user/hand/left/input/dpad_up/touch");
++		ADD_BINDING(m_Touch_BY, "/user/hand/left/input/dpad_right/touch");
++		ADD_BINDING(m_Button_AX, "/user/hand/right/input/a/click");
++		ADD_BINDING(m_Button_AX, "/user/hand/right/input/x/click");
++		ADD_BINDING(m_Button_BY, "/user/hand/right/input/b/click");
++		ADD_BINDING(m_Button_BY, "/user/hand/right/input/y/click");
++		ADD_BINDING(m_Touch_AX, "/user/hand/right/input/a/touch");
++		ADD_BINDING(m_Touch_AX, "/user/hand/right/input/x/touch");
++		ADD_BINDING(m_Touch_BY, "/user/hand/right/input/b/touch");
++		ADD_BINDING(m_Touch_BY, "/user/hand/right/input/y/touch");
++		for (int i = 0; i < ovrHand_Count; i++)
++		{
++			ADD_BINDING(m_Thumbstick, prefixes[i] + "/input/thumbstick");
++			ADD_BINDING(m_Button_Thumb, prefixes[i] + "/input/thumbstick/click");
++			ADD_BINDING(m_Touch_Thumb, prefixes[i] + "/input/thumbstick/touch");
++			ADD_BINDING(m_Touch_ThumbRest, prefixes[i] + "/input/thumbrest/touch");
++			ADD_BINDING(m_HandTrigger, prefixes[i] + "/input/squeeze/value");
++			ADD_BINDING(m_Touch_IndexTrigger, prefixes[i] + "/input/trigger/touch");
++			ADD_BINDING(m_IndexTrigger, prefixes[i] + "/input/trigger/value");
++			ADD_BINDING(m_Pose, prefixes[i] + "/input/aim/pose");
++			ADD_BINDING(m_Vibration, prefixes[i] + "/output/haptic");
++		}
++		return GetXrPath("/interaction_profiles/valve/frame_controller");
++	}
++
 +	if (wmrProfile)
  	{
  		ADD_BINDING(m_Button_Enter, "/user/hand/left/input/menu/click");
@@ -106,7 +179,7 @@ index e6d5524..70b0c1f 100644
  		{
  			ADD_BINDING(m_Button_Enter, "/user/hand/left/input/trackpad/force");
  			ADD_BINDING(m_Button_AX, "/user/hand/left/input/a/click");
-@@ -474,7 +505,7 @@ XrPath InputManager::OculusTouch::GetSuggestedBindings(std::vector<XrActionSugge
+@@ -474,7 +578,7 @@ XrPath InputManager::OculusTouch::GetSuggestedBindings(std::vector<XrActionSugge
  
  	for (int i = 0; i < ovrHand_Count; i++)
  	{
@@ -115,7 +188,7 @@ index e6d5524..70b0c1f 100644
  		{
  			ADD_BINDING(m_Trackpad_Buttons, prefixes[i] + "/input/trackpad/y");
  			ADD_BINDING(m_Button_AX, prefixes[i] + "/input/trackpad/click");
-@@ -493,7 +524,7 @@ XrPath InputManager::OculusTouch::GetSuggestedBindings(std::vector<XrActionSugge
+@@ -493,7 +597,7 @@ XrPath InputManager::OculusTouch::GetSuggestedBindings(std::vector<XrActionSugge
  			ADD_BINDING(m_Thumbstick, prefixes[i] + "/input/thumbstick");
  			ADD_BINDING(m_Button_Thumb, prefixes[i] + "/input/thumbstick/click");
  			ADD_BINDING(m_Touch_Thumb, prefixes[i] + "/input/thumbstick/touch");
@@ -124,7 +197,7 @@ index e6d5524..70b0c1f 100644
  				ADD_BINDING(m_Touch_ThumbRest, prefixes[i] + "/input/trackpad/touch");
  			else
  				ADD_BINDING(m_Touch_ThumbRest, prefixes[i] + "/input/thumbrest/touch");
-@@ -508,9 +539,9 @@ XrPath InputManager::OculusTouch::GetSuggestedBindings(std::vector<XrActionSugge
+@@ -508,9 +612,9 @@ XrPath InputManager::OculusTouch::GetSuggestedBindings(std::vector<XrActionSugge
  
  #undef ADD_BINDING
  
@@ -136,7 +209,7 @@ index e6d5524..70b0c1f 100644
  		return GetXrPath("/interaction_profiles/microsoft/motion_controller");
  	else
  		return GetXrPath("/interaction_profiles/oculus/touch_controller");
-@@ -755,8 +786,11 @@ InputManager::XboxGamepad::~XboxGamepad()
+@@ -755,8 +859,11 @@ InputManager::XboxGamepad::~XboxGamepad()
  {
  }
  
@@ -189,7 +262,7 @@ index ea0ec1f..1aa3faf 100644
  
  protected:
 diff --git a/ReviveXR/REV_CAPI.cpp b/ReviveXR/REV_CAPI.cpp
-index 3b6f180..96f049d 100644
+index 3b6f180..2fefd84 100644
 --- a/ReviveXR/REV_CAPI.cpp
 +++ b/ReviveXR/REV_CAPI.cpp
 @@ -19,7 +19,7 @@
@@ -210,8 +283,11 @@ index 3b6f180..96f049d 100644
  
  	if (session->SystemProperties.trackingProperties.orientationTracking)
  		desc.AvailableTrackingCaps |= ovrTrackingCap_Orientation;
-@@ -226,14 +228,10 @@ OVR_PUBLIC_FUNCTION(void) ovr_Destroy(ovrSession session)
+@@ -224,16 +226,13 @@ OVR_PUBLIC_FUNCTION(void) ovr_Destroy(ovrSession session)
+ {
+ 	REV_TRACE(ovr_Destroy);
  
++	EFP_TimingStop();
  	session->DestroySession();
  
 -	if (!session->HookedFunctions.empty())
@@ -229,7 +305,7 @@ index 3b6f180..96f049d 100644
  
  	// Delete the session from the list of sessions
  	g_Sessions.erase(std::find_if(g_Sessions.begin(), g_Sessions.end(), [session](ovrHmdStruct const& o) { return &o == session; }));
-@@ -293,6 +291,7 @@ OVR_PUBLIC_FUNCTION(ovrResult) ovr_GetSessionStatus(ovrSession session, ovrSessi
+@@ -293,6 +292,7 @@ OVR_PUBLIC_FUNCTION(ovrResult) ovr_GetSessionStatus(ovrSession session, ovrSessi
  					break;
  				}
  				session->SessionStatus = status;
@@ -237,7 +313,7 @@ index 3b6f180..96f049d 100644
  
  				if (stateChanged.state == XR_SESSION_STATE_READY)
  					session->BeginSession();
-@@ -317,6 +316,10 @@ OVR_PUBLIC_FUNCTION(ovrResult) ovr_GetSessionStatus(ovrSession session, ovrSessi
+@@ -317,6 +317,10 @@ OVR_PUBLIC_FUNCTION(ovrResult) ovr_GetSessionStatus(ovrSession session, ovrSessi
  			session->SessionStatus = status;
  			break;
  		}
@@ -248,7 +324,7 @@ index 3b6f180..96f049d 100644
  		case XR_TYPE_EVENT_DATA_VISIBILITY_MASK_CHANGED_KHR:
  		{
  			const XrEventDataVisibilityMaskChangedKHR& maskChange =
-@@ -836,10 +839,18 @@ OVR_PUBLIC_FUNCTION(ovrSizei) ovr_GetFovTextureSize(ovrSession session, ovrEyeTy
+@@ -836,10 +840,18 @@ OVR_PUBLIC_FUNCTION(ovrSizei) ovr_GetFovTextureSize(ovrSession session, ovrEyeTy
  	REV_TRACE(ovr_GetFovTextureSize);
  
  	// TODO: Add support for pixelsPerDisplayPixel
@@ -269,16 +345,36 @@ index 3b6f180..96f049d 100644
  	return size;
  }
  
-@@ -1155,6 +1166,7 @@ OVR_PUBLIC_FUNCTION(ovrResult) ovr_EndFrame(ovrSession session, long long frameI
+@@ -901,7 +913,9 @@ OVR_PUBLIC_FUNCTION(ovrResult) ovr_WaitToBeginFrame(ovrSession session, long lon
+ 	assert(session->CurrentFrame.is_lock_free());
+ 	XrIndexedFrameState* frameState = &session->FrameStats[frameIndex % ovrMaxProvidedFrameStats];
+ 	XrFrameWaitInfo waitInfo = XR_TYPE(FRAME_WAIT_INFO);
++	EFP_TimingWaitFrame(false);
+ 	CHK_XR(xrWaitFrame(session->Session, &waitInfo, frameState));
++	EFP_TimingWaitFrame(true);
+ 	frameState->frameIndex = frameIndex;
+ 	session->CurrentFrame = frameState;
+ 
+@@ -926,6 +940,7 @@ OVR_PUBLIC_FUNCTION(ovrResult) ovr_BeginFrame(ovrSession session, long long fram
+ 
+ 	XrFrameBeginInfo beginInfo = XR_TYPE(FRAME_BEGIN_INFO);
+ 	CHK_XR(xrBeginFrame(session->Session, &beginInfo));
++	EFP_TimingBeginFrame(frameIndex);
+ 	return ovrSuccess;
+ }
+ 
+@@ -1154,7 +1169,9 @@ OVR_PUBLIC_FUNCTION(ovrResult) ovr_EndFrame(ovrSession session, long long frameI
+ 	endInfo.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
  	endInfo.layerCount = (uint32_t)layers.size();
  	endInfo.layers = layers.data();
++	EFP_TimingEndFrame(frameIndex);
  	CHK_XR(xrEndFrame(session->Session, &endInfo));
-+	EFP_FrameSubmitted(TargetFrame->predictedDisplayPeriod);
++	EFP_TimingFrameSubmitted(TargetFrame->predictedDisplayPeriod);
  
  	MicroProfileFlip();
  
 diff --git a/ReviveXR/REV_CAPI_D3D.cpp b/ReviveXR/REV_CAPI_D3D.cpp
-index 19791e4..6fc27c9 100644
+index 19791e4..c88555d 100644
 --- a/ReviveXR/REV_CAPI_D3D.cpp
 +++ b/ReviveXR/REV_CAPI_D3D.cpp
 @@ -6,7 +6,6 @@
@@ -328,7 +424,7 @@ index 19791e4..6fc27c9 100644
  
  			XrGraphicsBindingD3D11KHR graphicsBinding = XR_TYPE(GRAPHICS_BINDING_D3D11_KHR);
  			graphicsBinding.device = pDevice.Get();
-@@ -195,13 +188,10 @@ OVR_PUBLIC_FUNCTION(ovrResult) ovr_CreateTextureSwapChainDX(ovrSession session,
+@@ -195,13 +188,11 @@ OVR_PUBLIC_FUNCTION(ovrResult) ovr_CreateTextureSwapChainDX(ovrSession session,
  
  			// Hook D3D12 functions so we can ensure NULL descriptors keep working on typeless formats
  			// This fixes Echo Arena, among others.
@@ -343,14 +439,26 @@ index 19791e4..6fc27c9 100644
 +			HookVirtual(session, pDevice12.Get(), 20, (void*)HookCreateRenderTargetView12, (void**)&TrueCreateRenderTargetView12);
 +			EFP_Log("D3D12 session: queue %p, feature level 0x%x", pQueue.Get(), (unsigned)levels.MaxSupportedFeatureLevel);
 +			EFP_InstallFp64Workaround(pDevice12.Get());
++			EFP_TimingStart(pQueue.Get());
  
  			XrGraphicsBindingD3D12KHR graphicsBinding = XR_TYPE(GRAPHICS_BINDING_D3D12_KHR);
  			graphicsBinding.device = pDevice12.Get();
 diff --git a/ReviveXR/Runtime.cpp b/ReviveXR/Runtime.cpp
-index 9ac774a..646f9ce 100644
+index 9ac774a..c880553 100644
 --- a/ReviveXR/Runtime.cpp
 +++ b/ReviveXR/Runtime.cpp
-@@ -34,7 +34,10 @@ Runtime::HackInfo Runtime::s_known_hacks[] = {
+@@ -26,7 +26,9 @@ const char* Runtime::s_optional_extensions[] = {
+ 	XR_KHR_COMPOSITION_LAYER_CYLINDER_EXTENSION_NAME,
+ 	XR_EPIC_VIEW_CONFIGURATION_FOV_EXTENSION_NAME,
+ 	XR_OCULUS_AUDIO_DEVICE_GUID_EXTENSION_NAME,
+-	XR_FB_COLOR_SPACE_EXTENSION_NAME
++	XR_FB_COLOR_SPACE_EXTENSION_NAME,
++	// EchoFramePCVR: the Steam Frame's controllers, bound natively (InputManager.cpp)
++	"XR_VALVE_frame_controller_interaction"
+ };
+ 
+ Runtime::HackInfo Runtime::s_known_hacks[] = {
+@@ -34,7 +36,10 @@ Runtime::HackInfo Runtime::s_known_hacks[] = {
  	{ nullptr, "SteamVR/OpenXR", HACK_BROKEN_LINE_LOOP, 0, 0x100000000, true },
  	{ nullptr, "SteamVR/OpenXR", HACK_MIN_HAPTIC_DURATION, 0, 0, true },
  	{ nullptr, "Windows Mixed Reality Runtime", HACK_WAIT_FOR_SESSION_READY, 0, 0, true },
@@ -361,7 +469,7 @@ index 9ac774a..646f9ce 100644
  	{ "loneecho.exe", nullptr, HACK_FORCE_FOV_FALLBACK, 0, 0, true },
  };
  
-@@ -56,6 +59,10 @@ ovrResult Runtime::CreateInstance(XrInstance* out_Instance, const ovrInitParams*
+@@ -56,6 +61,10 @@ ovrResult Runtime::CreateInstance(XrInstance* out_Instance, const ovrInitParams*
  	for (XrExtensionProperties& props : properties)
  		props = XR_TYPE(EXTENSION_PROPERTIES);
  	CHK_XR(xrEnumerateInstanceExtensionProperties(nullptr, (uint32_t)properties.size(), &size, properties.data()));
@@ -372,7 +480,7 @@ index 9ac774a..646f9ce 100644
  
  	m_extensions.clear();
  
-@@ -81,7 +88,9 @@ ovrResult Runtime::CreateInstance(XrInstance* out_Instance, const ovrInitParams*
+@@ -81,7 +90,9 @@ ovrResult Runtime::CreateInstance(XrInstance* out_Instance, const ovrInitParams*
  	ColorSpace = Supports(XR_FB_COLOR_SPACE_EXTENSION_NAME);
  
  	XrInstanceCreateInfo createInfo = XR_TYPE(INSTANCE_CREATE_INFO);
@@ -383,7 +491,7 @@ index 9ac774a..646f9ce 100644
  	createInfo.enabledExtensionCount = (uint32_t)m_extensions.size();
  	createInfo.enabledExtensionNames = m_extensions.data();
  	CHK_XR(xrCreateInstance(&createInfo, out_Instance));
-@@ -92,6 +101,11 @@ ovrResult Runtime::CreateInstance(XrInstance* out_Instance, const ovrInitParams*
+@@ -92,6 +103,11 @@ ovrResult Runtime::CreateInstance(XrInstance* out_Instance, const ovrInitParams*
  
  	XrInstanceProperties props = XR_TYPE(INSTANCE_PROPERTIES);
  	CHK_XR(xrGetInstanceProperties(*out_Instance, &props));
@@ -651,7 +759,7 @@ index 171f3ad..01d5a7d 100644
  	ovrResult StartSession(void* graphicsBinding);
  	ovrResult BeginSession();
 diff --git a/ReviveXR/Swapchain.cpp b/ReviveXR/Swapchain.cpp
-index 477ca09..4d2b33f 100644
+index 477ca09..8a91904 100644
 --- a/ReviveXR/Swapchain.cpp
 +++ b/ReviveXR/Swapchain.cpp
 @@ -8,6 +8,21 @@
@@ -676,7 +784,17 @@ index 477ca09..4d2b33f 100644
  	XrSwapchainImageReleaseInfo releaseInfo = XR_TYPE(SWAPCHAIN_IMAGE_RELEASE_INFO);
  	CHK_XR(xrReleaseSwapchainImage(Swapchain, &releaseInfo));
  
-@@ -62,12 +77,27 @@ ovrResult ovrTextureSwapChainData::Init(XrSession session, const ovrTextureSwapC
+@@ -19,7 +34,9 @@ ovrResult ovrTextureSwapChainData::Commit(ovrSession session)
+ 		// TODO: We could move this wait to the end of EndFrame so we submit earlier
+ 		XrSwapchainImageWaitInfo waitInfo = XR_TYPE(SWAPCHAIN_IMAGE_WAIT_INFO);
+ 		waitInfo.timeout = (*session->CurrentFrame).predictedDisplayPeriod;
++		auto waitStart = std::chrono::steady_clock::now();
+ 		CHK_XR(xrWaitSwapchainImage(Swapchain, &waitInfo));
++		EFP_TimingCommit(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - waitStart).count());
+ 	}
+ 	return ovrSuccess;
+ }
+@@ -62,12 +79,27 @@ ovrResult ovrTextureSwapChainData::Init(XrSession session, const ovrTextureSwapC
  	createInfo.mipCount = desc->MipLevels;
  	CHK_XR(xrCreateSwapchain(session, &createInfo, &Swapchain));
  

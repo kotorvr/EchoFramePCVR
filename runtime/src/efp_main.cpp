@@ -25,6 +25,7 @@ static float g_renderScale = 1.0f;
 static bool g_hmdCache = true;
 static char g_serial[24];
 static bool g_fp64Dump;
+static bool g_frameTiming = true;
 
 static FILE* OpenInDir(const wchar_t* name, const wchar_t* mode)
 {
@@ -68,6 +69,7 @@ bool EFP_UnderWine()
 
 float EFP_RenderScale() { return g_renderScale; }
 bool EFP_Fp64Dump() { return g_fp64Dump; }
+bool EFP_FrameTiming() { return g_frameTiming; }
 
 void EFP_DumpShader(const char* stage, uint64_t hash, const void* code, size_t size)
 {
@@ -119,6 +121,8 @@ static void ReadSettings()
 			g_hmdCache = atoi(value) != 0;
 		else if (!_stricmp(key, "Fp64Dump"))
 			g_fp64Dump = atoi(value) != 0;
+		else if (!_stricmp(key, "FrameTiming"))
+			g_frameTiming = atoi(value) != 0;
 		else if (!_stricmp(key, "HmdSerial"))
 			strncpy_s(g_serial, value, _TRUNCATE);
 	}
@@ -202,33 +206,6 @@ void EFP_RestoreVirtual(void** slotAddress, void* original)
 	}
 }
 
-void EFP_FrameSubmitted(int64_t periodNs)
-{
-	static LARGE_INTEGER freq, start, last;
-	static int frames;
-	static double worst;
-	LARGE_INTEGER now;
-	QueryPerformanceCounter(&now);
-	if (!freq.QuadPart) {
-		QueryPerformanceFrequency(&freq);
-		start = last = now;
-		EFP_Log("frames: first frame submitted");
-		return;
-	}
-	double gap = double(now.QuadPart - last.QuadPart) / freq.QuadPart;
-	if (gap > worst) worst = gap;
-	last = now;
-	frames++;
-	double span = double(now.QuadPart - start.QuadPart) / freq.QuadPart;
-	if (span >= 10.0) {
-		EFP_Log("frames: %.1f fps over %.0f s (display %.1f Hz), slowest frame %.1f ms",
-		        frames / span, span, periodNs > 0 ? 1e9 / periodNs : 0.0, worst * 1000.0);
-		start = now;
-		frames = 0;
-		worst = 0;
-	}
-}
-
 BOOL APIENTRY DllMain(HANDLE module, DWORD reason, LPVOID)
 {
 	if (reason == DLL_PROCESS_ATTACH) {
@@ -239,7 +216,8 @@ BOOL APIENTRY DllMain(HANDLE module, DWORD reason, LPVOID)
 		if (FILE* f = OpenInDir(L"runtime.log", L"w")) fclose(f);      // a fresh log per launch
 		ReadSettings();
 		EFP_Log("EchoFramePCVR runtime loaded (LibOVR on OpenXR, ReviveXR)%s", EFP_UnderWine() ? ", under Wine/Proton" : "");
-		EFP_Log("settings: RenderScale %.2f, HmdCache %d, HmdSerial %s", g_renderScale, g_hmdCache ? 1 : 0, EFP_HmdSerial());
+		EFP_Log("settings: RenderScale %.2f, HmdCache %d, FrameTiming %d, HmdSerial %s", g_renderScale, g_hmdCache ? 1 : 0,
+		        g_frameTiming ? 1 : 0, EFP_HmdSerial());
 	}
 	return TRUE;
 }

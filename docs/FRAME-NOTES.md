@@ -109,3 +109,32 @@ User report: lobby visible, controllers work, playable in the menu space, but:
 3. **Native Frame controller bindings** (`XR_VALVE_frame_controller_interaction`) in the Revive patch. The Echo menu goes on the left `view` button, so the right `menu`/`system` stays SteamVR's. Log the bound profile.
 4. **Effects.** Compare in the headset against the PC at the same Low preset to separate missing-by-preset from missing-by-bug. Check `Fp64Dump` for any shader stubbed instead of demoted.
 5. **Later:** mic and voice chat check, a full match, a one-click installer, Echo Arcade.
+
+## Frame timing and first GPU A/Bs (2026-10-02)
+
+- **Timing in runtime.log** (`efp_timing.cpp`, `FrameTiming = 1` in echoframe.ini). Every 10 s there's a line with avg/p95/max in ms:
+  - `gpu`: D3D12 timestamps on Echo's queue, written after xrBeginFrame and just before xrEndFrame;
+  - `gpu interval`: end timestamp to end timestamp;
+  - `cpu`: xrWaitFrame returning → xrEndFrame;
+  - `xrWaitFrame`, `swapchain wait` (xrWaitSwapchainImage in commit), `xrEndFrame`.
+- **Menu space, 72 Hz, 1728×1728 per eye, Low preset:** GPU 6.8 ms, CPU 1.2 ms, the rest is spent in xrWaitFrame. So the CPU is not the problem.
+- **A/B in the menu space** (GPU ms; the menu holds 72 fps in every case):
+
+  | change | GPU ms |
+  |---|---|
+  | baseline | 6.8 |
+  | `TU_DEBUG=sysmem` | 6.8 (Turnip already chooses sysmem) |
+  | `TU_DEBUG=gmem` | 9.7 (worse) |
+  | RenderScale 0.7 (49% of the pixels) | 3.7 |
+  | TAA off | 5.0 |
+
+  The GPU cost is almost all per pixel: 49% of the pixels cost 54% of the time.
+- **Starting in the lobby doesn't work.** `-level mpl_lobby_b2 -gametype social_2.0` loads level 0x3F99… without a server, logs "Only one CR15NetMetricsCS is allowed to exist" and stays on the loading screen; it never logs in. Lobby numbers still need someone in the headset.
+- **The launcher quoted every argument.** Echo's parser takes `"-level" "mpl_lobby_b2"` as `-level` with no value and exits with code 0 before writing a log; the message only shows in the Proton log (OutputDebugString). Now only arguments with spaces are quoted. `frame.py launch` takes Echo arguments and `KEY=VALUE` environment variables.
+- **Native Frame bindings.** `XR_VALVE_frame_controller_interaction` is enabled and `/interaction_profiles/valve/frame_controller` is suggested first, before Index and Touch. The component paths come from SteamVR's `vrclient.so`.
+  - Echo's menu is on the left `view` button.
+  - X/Y come from the left d-pad (down/left and up/right), A/B from the right diamond (a/x and b/y).
+  - Right `menu`/`system` stay with SteamVR.
+  - SteamVR rejects `thumbrest/touch` for this profile. Rejected paths are now found one at a time and left out instead of losing the whole profile.
+  - Not yet checked in the headset: the log line saying which profile each hand bound to.
+

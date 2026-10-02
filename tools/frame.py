@@ -4,7 +4,9 @@
   frame.py recon                      what the Frame has (SteamOS, Proton, SteamVR, OpenXR, GPU)
   frame.py push-game ECHO_DIR         copies an Echo VR PCVR install to the Frame (resumable)
   frame.py install                    copies build/out/ to it and sets up the Steam shortcut
-  frame.py launch                     starts Echo on the Frame (stopping a running one first)
+  frame.py launch [KEY=VALUE...] [ECHO_ARGS...]
+                                      starts Echo on the Frame (stopping a running one first), with
+                                      extra environment variables and arguments (e.g. TU_DEBUG=sysmem)
   frame.py stop                       ends Echo's session (Echo, its crash reporter, Wine)
   frame.py graphics [KEY=VALUE...]    shows or sets Echo's graphics settings on the Frame (Echo stopped);
                                       "frame" applies the Frame profile (no adaptive res, 72 fps, no MSAA)
@@ -214,9 +216,15 @@ def cmd_stop(args):
 
 
 def cmd_launch(args):
+    """KEY=VALUE arguments go into Echo's environment (e.g. TU_DEBUG=sysmem), the rest to Echo
+    itself; without any, the shortcut's launch options go back to the default."""
     stop()
     throttle_off()
     gid = game_id()
+    env = [a for a in args if "=" in a and not a.startswith("-")]
+    options = " ".join([*env, LAUNCH_OPTIONS, *(a for a in args if a not in env)])
+    if steam("configure", str(gid >> 32), os.environ.get("EFP_PROTON", "proton_11-arm64"), options) != "ok":
+        sys.exit("Steam didn't take the launch options; is the Frame on its home screen?")
     sh(f"date +%s > '{remote_path(STATE)}/launched'; nohup steam steam://rungameid/{gid} >/dev/null 2>&1 &")
     print(f"started game {gid}; logs with: frame.py logs")
 
@@ -246,7 +254,7 @@ def cmd_wait(args):
     state = "timeout"
     while time.time() - start < limit:
         p = probe(root)
-        if p.get("start", 0) >= since:
+        if p.get("start", 0) > since:   # a stopped run may have written in the launch second
             if p.get("frames", 0) >= 2:
                 state = "frames"
                 break

@@ -52,7 +52,7 @@ set DEF=/DXR_USE_PLATFORM_WIN32 /DVK_NO_PROTOTYPES /DVK_USE_PLATFORM_WIN32_KHR /
 set SRC=%REV%\Common.cpp %REV%\HapticsBuffer.cpp %REV%\InputManager.cpp %REV%\REV_CAPI.cpp %REV%\REV_CAPI_Audio.cpp
 set SRC=%SRC% %REV%\REV_CAPI_D3D.cpp %REV%\REV_CAPI_GL.cpp %REV%\REV_CAPI_Vk.cpp %REV%\Session.cpp %REV%\Runtime.cpp
 set SRC=%SRC% %REV%\Swapchain.cpp %REV%\SwapchainD3D11.cpp %REV%\SwapchainD3D12.cpp %REV%\SwapchainGL.cpp %REV%\SwapchainVk.cpp
-set SRC=%SRC% %REV%\microprofile.cpp %OVR%\Shim\OVR_CAPI_Util.cpp %OVR%\Shim\OVR_StereoProjection.cpp runtime\src\efp_main.cpp runtime\src\efp_fp64.cpp runtime\src\efp_dxil.cpp
+set SRC=%SRC% %REV%\microprofile.cpp %OVR%\Shim\OVR_CAPI_Util.cpp %OVR%\Shim\OVR_StereoProjection.cpp runtime\src\efp_main.cpp runtime\src\efp_fp64.cpp runtime\src\efp_dxil.cpp runtime\src\efp_timing.cpp
 set LIBS=build\openxr\src\loader\openxr_loader.lib Ws2_32.lib opengl32.lib d3d11.lib d3d12.lib dxgi.lib dxguid.lib dsound.lib
 set LIBS=%LIBS% Winmm.lib Shlwapi.lib Pathcch.lib user32.lib advapi32.lib ole32.lib shell32.lib cfgmgr32.lib
 
