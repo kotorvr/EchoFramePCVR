@@ -3,11 +3,12 @@
 
   ab_lobby.py SESSION_ID CONFIG [CONFIG...]
 
-Each CONFIG is NAME:item,item,... where an item is
+Each CONFIG is NAME:item|item|... where an item is
   env:KEY=VALUE      environment variable for Echo (e.g. env:FDM_DEBUG=enable)
   ini:KEY=VALUE      the runtime's echoframe.ini (e.g. ini:Foveation=0, ini:RenderScale=0.8)
   gfx:KEY=VALUE      Echo's graphics settings (e.g. gfx:temporalaa=false)
-  live:KEY=VALUE     echoframe.ini change made halfway through the run (e.g. live:Foveation=0)
+  live:KEY=VALUE     echoframe.ini change made halfway through the run (e.g. live:Foveation=0,
+                     live:Poke=20AFBC8:f:4.0)
 For every config Echo is restarted into the session (frame.py join), the run waits until the
 player has spawned plus SETTLE seconds, then averages the GPU/fps lines of the next MEASURE
 seconds. ini and gfx changes are undone after each config. Results are appended to
@@ -26,7 +27,7 @@ SETTLE = int(os.environ.get("AB_SETTLE", "25"))
 MEASURE = int(os.environ.get("AB_MEASURE", "40"))
 GPU = re.compile(r"\[(\d\d):(\d\d):(\d\d)\.\d+\]\s+ms: gpu avg ([\d.]+) p95 ([\d.]+)")
 FPS = re.compile(r"\[(\d\d):(\d\d):(\d\d)\.\d+\] frames: ([\d.]+) fps over \d+ s \(display ([\d.]+) Hz\), slowest frame ([\d.]+)")
-DEFAULT_INI = {"Foveation": "2", "RenderScale": "1.0"}
+DEFAULT_INI = {"Foveation": "2", "RenderScale": "1.0", "Patch": "", "Poke": "", "Skip": "", "PassTiming": "0"}
 
 
 def secs(m):
@@ -126,7 +127,7 @@ def main():
     with open(path, "a", encoding="utf-8") as out:
         for spec in sys.argv[2:]:
             name, _, items = spec.partition(":")
-            run(session, name, [i for i in items.split(",") if i], out)
+            run(session, name, [i for i in items.split("|") if i], out)
     frame.cmd_ini([f"{k}={v}" for k, v in DEFAULT_INI.items()])
 
 

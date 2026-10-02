@@ -30,6 +30,8 @@ static bool g_frameTiming = true;
 static int g_foveation = 2;
 static bool g_velocityLog;
 static bool g_census = true;
+static bool g_passTiming;
+static bool g_gazeFoveation = true;
 static FILETIME g_settingsTime;          // echoframe.ini's last write time, when it was last read
 
 static FILE* OpenInDir(const wchar_t* name, const wchar_t* mode)
@@ -78,6 +80,8 @@ bool EFP_FrameTiming() { return g_frameTiming; }
 int EFP_Foveation() { return g_foveation; }
 bool EFP_VelocityLog() { return g_velocityLog; }
 bool EFP_Census() { return g_census; }
+bool EFP_PassTiming() { return g_passTiming; }
+bool EFP_GazeFoveation() { return g_gazeFoveation; }
 
 void EFP_DumpShader(const char* stage, uint64_t hash, const void* code, size_t size)
 {
@@ -128,10 +132,11 @@ static void ReadSettings(bool live)
 	SettingsTime(&g_settingsTime);
 	FILE* f = OpenInDir(L"echoframe.ini", L"r");
 	if (!f) return;
-	char line[256];
+	bool skipSeen = false, pokeSeen = false;
+	char line[1024];
 	while (fgets(line, sizeof(line), f)) {
-		char key[64], value[64];
-		if (line[0] == '#' || line[0] == ';' || sscanf_s(line, " %63[^= ] = %63s", key, (unsigned)sizeof(key), value, (unsigned)sizeof(value)) != 2)
+		char key[64], value[960];
+		if (line[0] == '#' || line[0] == ';' || sscanf_s(line, " %63[^= ] = %959s", key, (unsigned)sizeof(key), value, (unsigned)sizeof(value)) != 2)
 			continue;
 		if (!_stricmp(key, "Foveation")) {
 			int level = std::min(3, std::max(0, atoi(value)));
@@ -143,12 +148,34 @@ static void ReadSettings(bool live)
 			if (live && on != g_velocityLog) EFP_Log("settings: VelocityLog %d", on ? 1 : 0);
 			g_velocityLog = on;
 		}
+		else if (!_stricmp(key, "Poke")) {
+			if (live) EFP_Log("settings: Poke %s", value);
+			EFP_SetPokes(value);
+			pokeSeen = true;
+		}
+		else if (!_stricmp(key, "Peek"))
+			EFP_SetPeek(value);
+		else if (!_stricmp(key, "Patch")) {
+			if (!live) EFP_ApplyPatches(value);   // before Echo sets up its renderer
+		}
+		else if (!_stricmp(key, "Skip")) {
+			if (live) EFP_Log("settings: Skip %s", value);
+			EFP_SetSkip(value);
+			skipSeen = true;
+		}
+		else if (!_stricmp(key, "PassTiming")) {
+			bool on = atoi(value) != 0;
+			if (live && on != g_passTiming) EFP_Log("settings: PassTiming %d", on ? 1 : 0);
+			g_passTiming = on;
+		}
 		else if (live)
 			continue;
 		else if (!_stricmp(key, "RenderScale")) {
 			float s = (float)atof(value);
 			if (s >= 0.25f && s <= 2.0f) g_renderScale = s;
 		}
+		else if (!_stricmp(key, "GazeFoveation"))
+			g_gazeFoveation = atoi(value) != 0;
 		else if (!_stricmp(key, "Census"))
 			g_census = atoi(value) != 0;
 		else if (!_stricmp(key, "HmdCache"))
@@ -160,6 +187,8 @@ static void ReadSettings(bool live)
 		else if (!_stricmp(key, "HmdSerial"))
 			strncpy_s(g_serial, value, _TRUNCATE);
 	}
+	if (!skipSeen) EFP_SetSkip("");
+	if (!pokeSeen) EFP_SetPokes("");
 	fclose(f);
 }
 

@@ -19,10 +19,18 @@ index 6baac79..4594a7f 100644
  
  #define CHK_OVR(x) \
 diff --git a/ReviveXR/InputManager.cpp b/ReviveXR/InputManager.cpp
-index e6d5524..1f58a41 100644
+index e6d5524..37e316e 100644
 --- a/ReviveXR/InputManager.cpp
 +++ b/ReviveXR/InputManager.cpp
-@@ -30,17 +30,63 @@ InputManager::InputManager(XrInstance instance)
+@@ -26,21 +26,71 @@ InputManager::InputManager(XrInstance instance)
+ 	m_InputDevices.push_back(new XboxGamepad(instance));
+ 	m_InputDevices.push_back(new OculusRemote(instance));
+ 
++	// EchoFramePCVR: our own eye gaze action set, synced with Revive's (efp_gaze.cpp)
++	if (Runtime::Get().Supports(XR_EXT_EYE_GAZE_INTERACTION_EXTENSION_NAME) && EFP_GazeInit(instance))
++		m_ActionSets.push_back(XrActiveActionSet{ EFP_GazeActionSet() });
++
+ 	for (const InputDevice* device : m_InputDevices)
  	{
  		device->GetActiveSets(m_ActionSets);
  
@@ -97,7 +105,7 @@ index e6d5524..1f58a41 100644
  	}
  }
  
-@@ -198,6 +244,8 @@ void InputManager::GetTrackingState(ovrSession session, ovrTrackingState* outSta
+@@ -198,6 +248,8 @@ void InputManager::GetTrackingState(ovrSession session, ovrTrackingState* outSta
  		if (XR_FAILED(xrLocateSpace(m_ActionSpaces[i], space, displayTime, &handLocation)))
  			xrLocateSpace(m_ActionSpaces[i], space, (*session->CurrentFrame).predictedDisplayTime, &handLocation);
  		outState->HandStatusFlags[i] = SpaceRelationToPoseState(handLocation, absTime, m_LastTrackingState.HandPoses[i], outState->HandPoses[i]);
@@ -106,7 +114,7 @@ index e6d5524..1f58a41 100644
  	}
  
  	XrSpace origin = session->OriginSpaces[session->TrackingOrigin];
-@@ -435,20 +483,78 @@ void InputManager::OculusTouch::UpdateHaptics(XrSession session, XrDuration disp
+@@ -435,20 +487,78 @@ void InputManager::OculusTouch::UpdateHaptics(XrSession session, XrDuration disp
  	}
  }
  
@@ -188,7 +196,7 @@ index e6d5524..1f58a41 100644
  		{
  			ADD_BINDING(m_Button_Enter, "/user/hand/left/input/trackpad/force");
  			ADD_BINDING(m_Button_AX, "/user/hand/left/input/a/click");
-@@ -474,7 +580,7 @@ XrPath InputManager::OculusTouch::GetSuggestedBindings(std::vector<XrActionSugge
+@@ -474,7 +584,7 @@ XrPath InputManager::OculusTouch::GetSuggestedBindings(std::vector<XrActionSugge
  
  	for (int i = 0; i < ovrHand_Count; i++)
  	{
@@ -197,7 +205,7 @@ index e6d5524..1f58a41 100644
  		{
  			ADD_BINDING(m_Trackpad_Buttons, prefixes[i] + "/input/trackpad/y");
  			ADD_BINDING(m_Button_AX, prefixes[i] + "/input/trackpad/click");
-@@ -493,7 +599,7 @@ XrPath InputManager::OculusTouch::GetSuggestedBindings(std::vector<XrActionSugge
+@@ -493,7 +603,7 @@ XrPath InputManager::OculusTouch::GetSuggestedBindings(std::vector<XrActionSugge
  			ADD_BINDING(m_Thumbstick, prefixes[i] + "/input/thumbstick");
  			ADD_BINDING(m_Button_Thumb, prefixes[i] + "/input/thumbstick/click");
  			ADD_BINDING(m_Touch_Thumb, prefixes[i] + "/input/thumbstick/touch");
@@ -206,7 +214,7 @@ index e6d5524..1f58a41 100644
  				ADD_BINDING(m_Touch_ThumbRest, prefixes[i] + "/input/trackpad/touch");
  			else
  				ADD_BINDING(m_Touch_ThumbRest, prefixes[i] + "/input/thumbrest/touch");
-@@ -508,9 +614,9 @@ XrPath InputManager::OculusTouch::GetSuggestedBindings(std::vector<XrActionSugge
+@@ -508,9 +618,9 @@ XrPath InputManager::OculusTouch::GetSuggestedBindings(std::vector<XrActionSugge
  
  #undef ADD_BINDING
  
@@ -218,7 +226,7 @@ index e6d5524..1f58a41 100644
  		return GetXrPath("/interaction_profiles/microsoft/motion_controller");
  	else
  		return GetXrPath("/interaction_profiles/oculus/touch_controller");
-@@ -601,6 +707,7 @@ void InputManager::OculusTouch::GetInputState(XrSession session, ovrControllerTy
+@@ -601,6 +711,7 @@ void InputManager::OculusTouch::GetInputState(XrSession session, ovrControllerTy
  		inputState->ThumbstickNoDeadzone[i] = m_Thumbstick.GetVector(session, hand);
  		inputState->IndexTriggerNoDeadzone[i] = m_IndexTrigger.GetAnalog(session, hand);
  		inputState->HandTriggerNoDeadzone[i] = m_HandTrigger.GetAnalog(session, hand);
@@ -226,7 +234,7 @@ index e6d5524..1f58a41 100644
  
  		// Derive gestures from touch flags
  		if (!Runtime::Get().UseHack(Runtime::HACK_WMR_PROFILE) || inputState->HandTriggerNoDeadzone[i] > 0.5f)
-@@ -755,8 +862,11 @@ InputManager::XboxGamepad::~XboxGamepad()
+@@ -755,8 +866,11 @@ InputManager::XboxGamepad::~XboxGamepad()
  {
  }
  
@@ -239,6 +247,22 @@ index e6d5524..1f58a41 100644
  #define ADD_BINDING(action, path) outBindings.push_back(XrActionSuggestedBinding{ action, GetXrPath(std::string("/user/gamepad") + path) })
  
  	ADD_BINDING(m_Button_A, "/input/a/click");
+@@ -886,12 +1000,15 @@ ovrResult InputManager::AttachSession(XrSession session)
+ 			device->GetActionSpaces(session, m_ActionSpaces);
+ 			actionSets.push_back(device->ActionSet());
+ 		}
++		if (EFP_GazeActionSet())
++			actionSets.push_back(EFP_GazeActionSet());
+ 
+ 		XrSessionActionSetsAttachInfo attachInfo = XR_TYPE(SESSION_ACTION_SETS_ATTACH_INFO);
+ 		attachInfo.countActionSets = (uint32_t)actionSets.size();
+ 		attachInfo.actionSets = actionSets.data();
+ 		CHK_XR(xrAttachSessionActionSets(session, &attachInfo));
+ 	}
++	EFP_GazeAttach(session);
+ 	return ovrSuccess;
+ }
+ 
 diff --git a/ReviveXR/InputManager.h b/ReviveXR/InputManager.h
 index ea0ec1f..1aa3faf 100644
 --- a/ReviveXR/InputManager.h
@@ -279,7 +303,7 @@ index ea0ec1f..1aa3faf 100644
  
  protected:
 diff --git a/ReviveXR/REV_CAPI.cpp b/ReviveXR/REV_CAPI.cpp
-index 3b6f180..1042bf2 100644
+index 3b6f180..3e13c2c 100644
 --- a/ReviveXR/REV_CAPI.cpp
 +++ b/ReviveXR/REV_CAPI.cpp
 @@ -19,7 +19,7 @@
@@ -371,7 +395,7 @@ index 3b6f180..1042bf2 100644
  	return size;
  }
  
-@@ -901,7 +915,9 @@ OVR_PUBLIC_FUNCTION(ovrResult) ovr_WaitToBeginFrame(ovrSession session, long lon
+@@ -901,12 +915,15 @@ OVR_PUBLIC_FUNCTION(ovrResult) ovr_WaitToBeginFrame(ovrSession session, long lon
  	assert(session->CurrentFrame.is_lock_free());
  	XrIndexedFrameState* frameState = &session->FrameStats[frameIndex % ovrMaxProvidedFrameStats];
  	XrFrameWaitInfo waitInfo = XR_TYPE(FRAME_WAIT_INFO);
@@ -381,7 +405,13 @@ index 3b6f180..1042bf2 100644
  	frameState->frameIndex = frameIndex;
  	session->CurrentFrame = frameState;
  
-@@ -926,6 +942,7 @@ OVR_PUBLIC_FUNCTION(ovrResult) ovr_BeginFrame(ovrSession session, long long fram
+ 	if (session->Input)
+ 		session->Input->SyncInputState(session->Session, frameState->predictedDisplayPeriod);
++	EFP_GazeUpdate(session->Session, session->ViewSpace, frameState->predictedDisplayTime);   // EchoFramePCVR: foveation follows the eyes
+ 	return ovrSuccess;
+ }
+ 
+@@ -926,6 +943,7 @@ OVR_PUBLIC_FUNCTION(ovrResult) ovr_BeginFrame(ovrSession session, long long fram
  
  	XrFrameBeginInfo beginInfo = XR_TYPE(FRAME_BEGIN_INFO);
  	CHK_XR(xrBeginFrame(session->Session, &beginInfo));
@@ -389,7 +419,7 @@ index 3b6f180..1042bf2 100644
  	return ovrSuccess;
  }
  
-@@ -1154,7 +1171,12 @@ OVR_PUBLIC_FUNCTION(ovrResult) ovr_EndFrame(ovrSession session, long long frameI
+@@ -1154,7 +1172,14 @@ OVR_PUBLIC_FUNCTION(ovrResult) ovr_EndFrame(ovrSession session, long long frameI
  	endInfo.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
  	endInfo.layerCount = (uint32_t)layers.size();
  	endInfo.layers = layers.data();
@@ -399,11 +429,13 @@ index 3b6f180..1042bf2 100644
 +	EFP_FoveationFrame();
 +	EFP_SettingsPoll();
 +	EFP_CensusFrame();
++	EFP_PassesFrame();
++	EFP_PatchFrame();
  
  	MicroProfileFlip();
  
 diff --git a/ReviveXR/REV_CAPI_D3D.cpp b/ReviveXR/REV_CAPI_D3D.cpp
-index 19791e4..c346f7d 100644
+index 19791e4..7781c13 100644
 --- a/ReviveXR/REV_CAPI_D3D.cpp
 +++ b/ReviveXR/REV_CAPI_D3D.cpp
 @@ -6,7 +6,6 @@
@@ -453,7 +485,7 @@ index 19791e4..c346f7d 100644
  
  			XrGraphicsBindingD3D11KHR graphicsBinding = XR_TYPE(GRAPHICS_BINDING_D3D11_KHR);
  			graphicsBinding.device = pDevice.Get();
-@@ -195,13 +188,13 @@ OVR_PUBLIC_FUNCTION(ovrResult) ovr_CreateTextureSwapChainDX(ovrSession session,
+@@ -195,13 +188,14 @@ OVR_PUBLIC_FUNCTION(ovrResult) ovr_CreateTextureSwapChainDX(ovrSession session,
  
  			// Hook D3D12 functions so we can ensure NULL descriptors keep working on typeless formats
  			// This fixes Echo Arena, among others.
@@ -471,25 +503,28 @@ index 19791e4..c346f7d 100644
 +			EFP_TimingStart(pQueue.Get());
 +			EFP_InstallFoveation(pDevice12.Get(), pQueue.Get());
 +			EFP_InstallCensus(pDevice12.Get());
++			EFP_InstallPasses(pDevice12.Get(), pQueue.Get());
  
  			XrGraphicsBindingD3D12KHR graphicsBinding = XR_TYPE(GRAPHICS_BINDING_D3D12_KHR);
  			graphicsBinding.device = pDevice12.Get();
 diff --git a/ReviveXR/Runtime.cpp b/ReviveXR/Runtime.cpp
-index 9ac774a..c880553 100644
+index 9ac774a..8ee4573 100644
 --- a/ReviveXR/Runtime.cpp
 +++ b/ReviveXR/Runtime.cpp
-@@ -26,7 +26,9 @@ const char* Runtime::s_optional_extensions[] = {
+@@ -26,7 +26,11 @@ const char* Runtime::s_optional_extensions[] = {
  	XR_KHR_COMPOSITION_LAYER_CYLINDER_EXTENSION_NAME,
  	XR_EPIC_VIEW_CONFIGURATION_FOV_EXTENSION_NAME,
  	XR_OCULUS_AUDIO_DEVICE_GUID_EXTENSION_NAME,
 -	XR_FB_COLOR_SPACE_EXTENSION_NAME
 +	XR_FB_COLOR_SPACE_EXTENSION_NAME,
 +	// EchoFramePCVR: the Steam Frame's controllers, bound natively (InputManager.cpp)
-+	"XR_VALVE_frame_controller_interaction"
++	"XR_VALVE_frame_controller_interaction",
++	// EchoFramePCVR: eye gaze, for foveated rendering (efp_gaze.cpp)
++	XR_EXT_EYE_GAZE_INTERACTION_EXTENSION_NAME
  };
  
  Runtime::HackInfo Runtime::s_known_hacks[] = {
-@@ -34,7 +36,10 @@ Runtime::HackInfo Runtime::s_known_hacks[] = {
+@@ -34,7 +38,10 @@ Runtime::HackInfo Runtime::s_known_hacks[] = {
  	{ nullptr, "SteamVR/OpenXR", HACK_BROKEN_LINE_LOOP, 0, 0x100000000, true },
  	{ nullptr, "SteamVR/OpenXR", HACK_MIN_HAPTIC_DURATION, 0, 0, true },
  	{ nullptr, "Windows Mixed Reality Runtime", HACK_WAIT_FOR_SESSION_READY, 0, 0, true },
@@ -500,7 +535,7 @@ index 9ac774a..c880553 100644
  	{ "loneecho.exe", nullptr, HACK_FORCE_FOV_FALLBACK, 0, 0, true },
  };
  
-@@ -56,6 +61,10 @@ ovrResult Runtime::CreateInstance(XrInstance* out_Instance, const ovrInitParams*
+@@ -56,6 +63,10 @@ ovrResult Runtime::CreateInstance(XrInstance* out_Instance, const ovrInitParams*
  	for (XrExtensionProperties& props : properties)
  		props = XR_TYPE(EXTENSION_PROPERTIES);
  	CHK_XR(xrEnumerateInstanceExtensionProperties(nullptr, (uint32_t)properties.size(), &size, properties.data()));
@@ -511,7 +546,7 @@ index 9ac774a..c880553 100644
  
  	m_extensions.clear();
  
-@@ -81,7 +90,9 @@ ovrResult Runtime::CreateInstance(XrInstance* out_Instance, const ovrInitParams*
+@@ -81,7 +92,9 @@ ovrResult Runtime::CreateInstance(XrInstance* out_Instance, const ovrInitParams*
  	ColorSpace = Supports(XR_FB_COLOR_SPACE_EXTENSION_NAME);
  
  	XrInstanceCreateInfo createInfo = XR_TYPE(INSTANCE_CREATE_INFO);
@@ -522,7 +557,7 @@ index 9ac774a..c880553 100644
  	createInfo.enabledExtensionCount = (uint32_t)m_extensions.size();
  	createInfo.enabledExtensionNames = m_extensions.data();
  	CHK_XR(xrCreateInstance(&createInfo, out_Instance));
-@@ -92,6 +103,11 @@ ovrResult Runtime::CreateInstance(XrInstance* out_Instance, const ovrInitParams*
+@@ -92,6 +105,11 @@ ovrResult Runtime::CreateInstance(XrInstance* out_Instance, const ovrInitParams*
  
  	XrInstanceProperties props = XR_TYPE(INSTANCE_PROPERTIES);
  	CHK_XR(xrGetInstanceProperties(*out_Instance, &props));

@@ -123,7 +123,7 @@ static void Stub(D3D12_GRAPHICS_PIPELINE_STATE_DESC& copy)
 	copy.HS = copy.DS = copy.GS = {};
 }
 
-static HRESULT STDMETHODCALLTYPE HookCreateGraphicsPSO(ID3D12Device* device, const D3D12_GRAPHICS_PIPELINE_STATE_DESC* desc, REFIID riid, void** out)
+static HRESULT STDMETHODCALLTYPE MakeGraphicsPSO(ID3D12Device* device, const D3D12_GRAPHICS_PIPELINE_STATE_DESC* desc, REFIID riid, void** out)
 {
 	if (!desc || !(UsesDoubles(desc->VS) || UsesDoubles(desc->PS) || UsesDoubles(desc->HS) || UsesDoubles(desc->DS) || UsesDoubles(desc->GS)))
 		return TrueCreateGraphicsPSO(device, desc, riid, out);
@@ -150,7 +150,16 @@ static HRESULT STDMETHODCALLTYPE HookCreateGraphicsPSO(ID3D12Device* device, con
 	return hr;
 }
 
-static HRESULT STDMETHODCALLTYPE HookCreateComputePSO(ID3D12Device* device, const D3D12_COMPUTE_PIPELINE_STATE_DESC* desc, REFIID riid, void** out)
+// The pipeline's pixel (or compute) shader hash, for the per-pass timing's labels (efp_passes.cpp)
+static HRESULT STDMETHODCALLTYPE HookCreateGraphicsPSO(ID3D12Device* device, const D3D12_GRAPHICS_PIPELINE_STATE_DESC* desc, REFIID riid, void** out)
+{
+	HRESULT hr = MakeGraphicsPSO(device, desc, riid, out);
+	if (SUCCEEDED(hr) && desc && out && desc->PS.pShaderBytecode)
+		EFP_PassesNotePso(*out, Hash(desc->PS));
+	return hr;
+}
+
+static HRESULT STDMETHODCALLTYPE MakeComputePSO(ID3D12Device* device, const D3D12_COMPUTE_PIPELINE_STATE_DESC* desc, REFIID riid, void** out)
 {
 	if (!desc || !UsesDoubles(desc->CS))
 		return TrueCreateComputePSO(device, desc, riid, out);
@@ -163,6 +172,14 @@ static HRESULT STDMETHODCALLTYPE HookCreateComputePSO(ID3D12Device* device, cons
 		copy.CS = { g_StubCS, sizeof(g_StubCS) };
 		hr = TrueCreateComputePSO(device, &copy, riid, out);
 	}
+	return hr;
+}
+
+static HRESULT STDMETHODCALLTYPE HookCreateComputePSO(ID3D12Device* device, const D3D12_COMPUTE_PIPELINE_STATE_DESC* desc, REFIID riid, void** out)
+{
+	HRESULT hr = MakeComputePSO(device, desc, riid, out);
+	if (SUCCEEDED(hr) && desc && out && desc->CS.pShaderBytecode)
+		EFP_PassesNotePso(*out, Hash(desc->CS));
 	return hr;
 }
 

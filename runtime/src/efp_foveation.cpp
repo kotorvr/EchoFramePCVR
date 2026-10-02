@@ -24,7 +24,12 @@
 #include <math.h>
 #include <stdio.h>
 #include <algorithm>
+#include <atomic>
 #include <map>
+#include <set>
+#include <condition_variable>
+#include <mutex>
+#include <thread>
 #include <unordered_map>
 #include <vector>
 
@@ -69,7 +74,7 @@ ComPtr<ID3D12CommandQueue> g_queue;
 ComPtr<ID3D12GraphicsCommandList> g_ownList;   // keeps a list alive; its vtable is the one hooked
 
 enum Shape : uint8_t { NotEye, OneEye, BothEyes };
-std::map<uint64_t, ComPtr<ID3D12Resource>> g_images;   // (width, height, shape) -> image; null: failed
+std::map<uint64_t, ComPtr<ID3D12Resource>> g_images;   // (width, height, gaze cell, shape) -> image; null: failed
 std::vector<ComPtr<ID3D12Resource>> g_retired;          // images of an earlier level, maybe still in flight
 
 // Census of what Echo binds, logged for the first minutes
@@ -108,6 +113,30 @@ uint8_t Rate(float tx, float ty)
 	return D3D12_SHADING_RATE_4X4;
 }
 
+// Eye-tracked foveation (efp_gaze.cpp): the gaze direction, as tangents, quantised to a 9x9 grid
+// of cells 0.15 apart so each cell's images are made once. Cell 0 = no gaze: fixed foveation.
+const int kGazeSteps = 9;
+const float kGazeStep = 0.15f;
+std::atomic<int> g_gazeCell;
+int g_gazeInvalidFrames;
+
+void CellCentre(int cell, float& gx, float& gy)
+{
+	int i = cell - 1;
+	gx = (i % kGazeSteps - kGazeSteps / 2) * kGazeStep;
+	gy = (i / kGazeSteps - kGazeSteps / 2) * kGazeStep;
+}
+
+// With a gaze: full rate within a smaller cone around where the eye looks, 2x2 outside it, and
+// never finer than fixed foveation's rate for that point (the lens edge stays coarse).
+uint8_t GazeRate(float tx, float ty, float gx, float gy)
+{
+	static const float inner[] = { 0, 0.45f, 0.33f, 0.25f };
+	float dx = tx - gx, dy = ty - gy;
+	uint8_t gaze = sqrtf(dx * dx + dy * dy) < inner[g_level] ? D3D12_SHADING_RATE_1X1 : D3D12_SHADING_RATE_2X2;
+	return std::max(gaze, Rate(tx, ty));   // D3D12 shading rates grow with coarseness
+}
+
 // Point (u, v) in [0,1] of an eye's image, as tangents. A one-eye target could be either eye,
 // so it takes the mean of the two (they mirror each other horizontally).
 void Tangents(int eye, float u, float v, float& tx, float& ty)
@@ -123,8 +152,10 @@ void Tangents(int eye, float u, float v, float& tx, float& ty)
 	ty = e.Up - v * (e.Up + e.Down);
 }
 
-ComPtr<ID3D12Resource> MakeImage(UINT width, UINT height, Shape shape)
+ComPtr<ID3D12Resource> MakeImage(UINT width, UINT height, Shape shape, int cell)
 {
+	float gx = 0, gy = 0;
+	if (cell) CellCentre(cell, gx, gy);
 	UINT tw = (width + g_tile - 1) / g_tile, th = (height + g_tile - 1) / g_tile;
 	UINT pitch = (tw + D3D12_TEXTURE_DATA_PITCH_ALIGNMENT - 1) & ~(D3D12_TEXTURE_DATA_PITCH_ALIGNMENT - 1);
 	std::vector<uint8_t> data(size_t(pitch) * th);
@@ -140,7 +171,7 @@ ComPtr<ID3D12Resource> MakeImage(UINT width, UINT height, Shape shape)
 			} else {
 				Tangents(-1, px / width, py / height, tx, ty);
 			}
-			uint8_t r = Rate(tx, ty);
+			uint8_t r = cell ? GazeRate(tx, ty, gx, gy) : Rate(tx, ty);
 			data[size_t(y) * pitch + x] = r;
 			counts[r == D3D12_SHADING_RATE_1X1 ? 0 : r == D3D12_SHADING_RATE_2X2 ? 1 : 2]++;
 		}
@@ -200,9 +231,62 @@ ComPtr<ID3D12Resource> MakeImage(UINT width, UINT height, Shape shape)
 	if (done) CloseHandle(done);
 
 	unsigned total = tw * th;
+	static LONG gazeImages;
+	if (cell) {
+		if (InterlockedIncrement(&gazeImages) % 50 == 1)
+			EFP_Log("foveation: %ld gaze-centred images made so far (%ux%u, full rate %.0f%% of the tiles)", gazeImages, width, height,
+			        100.0 * counts[0] / total);
+		return image;
+	}
 	EFP_Log("foveation: %ux%u %s target: full rate %.0f%%, 2x2 %.0f%%, 4x4 %.0f%% of the tiles", width, height,
 	        shape == BothEyes ? "two-eye" : "one-eye", 100.0 * counts[0] / total, 100.0 * counts[1] / total, 100.0 * counts[2] / total);
 	return image;
+}
+
+// Gaze-centred images are made on a worker thread (MakeImage waits for the GPU upload, which
+// would stall Echo's recording thread each time the eyes reach a new cell); until one is ready
+// the fixed image is used.
+struct Request { UINT Width, Height; Shape Kind; int Cell, Level; uint64_t Key; };
+std::mutex g_workLock;
+std::condition_variable g_workReady;
+std::vector<Request> g_work;
+std::set<uint64_t> g_pending;
+bool g_workerStarted;
+
+uint64_t ImageKey(const Target& t, Shape shape, int cell)
+{
+	return (uint64_t(t.Width) << 48) | (uint64_t(t.Height) << 32) | (uint64_t(cell) << 8) | shape;
+}
+
+void Worker()
+{
+	for (;;) {
+		Request r;
+		{
+			std::unique_lock<std::mutex> lk(g_workLock);
+			g_workReady.wait(lk, [] { return !g_work.empty(); });
+			r = g_work.back();
+			g_work.pop_back();
+		}
+		ComPtr<ID3D12Resource> image = r.Level == g_level ? MakeImage(r.Width, r.Height, r.Kind, r.Cell) : nullptr;
+		AcquireSRWLockExclusive(&g_lock);
+		if (image && r.Level == g_level) g_images.emplace(r.Key, image);
+		ReleaseSRWLockExclusive(&g_lock);
+		std::lock_guard<std::mutex> lk(g_workLock);
+		g_pending.erase(r.Key);
+	}
+}
+
+void RequestImage(const Target& t, Shape shape, int cell, uint64_t key)
+{
+	std::lock_guard<std::mutex> lk(g_workLock);
+	if (!g_pending.insert(key).second) return;
+	g_work.push_back({ t.Width, t.Height, shape, cell, g_level, key });
+	if (!g_workerStarted) {
+		g_workerStarted = true;
+		std::thread(Worker).detach();
+	}
+	g_workReady.notify_one();
 }
 
 // The shading-rate image for a bound target, or null for full rate. Takes g_lock shared.
@@ -218,29 +302,36 @@ ID3D12Resource* ImageFor(D3D12_CPU_DESCRIPTOR_HANDLE rtv)
 		}
 		ReleaseSRWLockExclusive(&g_lock);
 	}
+	int cell = g_gazeCell;
 	AcquireSRWLockShared(&g_lock);
 	auto it = g_targets.find(rtv.ptr);
 	Target t = {};
 	bool known = it != g_targets.end();
 	if (known) t = it->second;
 	Shape shape = known && g_level ? Classify(t) : NotEye;
-	uint64_t key = (uint64_t(t.Width) << 32) | (uint64_t(t.Height) << 8) | shape;
+	uint64_t fixedKey = ImageKey(t, shape, 0), gazeKey = ImageKey(t, shape, cell);
 	ID3D12Resource* image = nullptr;
-	bool make = false;
+	bool make = false, request = false;
 	if (shape != NotEye) {
-		auto img = g_images.find(key);
+		auto img = cell ? g_images.find(gazeKey) : g_images.end();
 		if (img != g_images.end()) image = img->second.Get();
-		else make = true;
+		else {
+			request = cell != 0;
+			img = g_images.find(fixedKey);
+			if (img != g_images.end()) image = img->second.Get();
+			else make = true;
+		}
 	}
 	bool census = g_censusOn;
 	ReleaseSRWLockShared(&g_lock);
+	if (request) RequestImage(t, shape, cell, gazeKey);
 
 	if (make || census) {
 		AcquireSRWLockExclusive(&g_lock);
 		if (make) {
-			auto img = g_images.find(key);   // another thread may have made it meanwhile
+			auto img = g_images.find(fixedKey);   // another thread may have made it meanwhile
 			if (img == g_images.end())
-				img = g_images.emplace(key, MakeImage(t.Width, t.Height, shape)).first;
+				img = g_images.emplace(fixedKey, MakeImage(t.Width, t.Height, shape, 0)).first;
 			image = img->second.Get();
 		}
 		if (g_censusOn) {
@@ -251,6 +342,7 @@ ID3D12Resource* ImageFor(D3D12_CPU_DESCRIPTOR_HANDLE rtv)
 	}
 	return image;
 }
+
 
 void Apply(ID3D12GraphicsCommandList* list, ID3D12Resource* image)
 {
@@ -346,6 +438,40 @@ D3D12_RESOURCE_ALLOCATION_INFO* STDMETHODCALLTYPE HookGetResourceAllocationInfo(
 }
 
 } // namespace
+
+void EFP_FoveationGaze(bool valid, float tx, float ty)
+{
+	if (!valid) {
+		// blinks and short tracking drops keep the last cell; a longer loss goes back to fixed
+		if (++g_gazeInvalidFrames > 30) g_gazeCell = 0;
+		return;
+	}
+	g_gazeInvalidFrames = 0;
+	int cell = g_gazeCell;
+	if (cell) {   // hysteresis: stay in the cell until the gaze is well past its edge
+		float gx, gy;
+		CellCentre(cell, gx, gy);
+		if (fabsf(tx - gx) < kGazeStep * 0.7f && fabsf(ty - gy) < kGazeStep * 0.7f) return;
+	}
+	int half = kGazeSteps / 2;
+	int ix = std::min(half, std::max(-half, (int)lroundf(tx / kGazeStep)));
+	int iy = std::min(half, std::max(-half, (int)lroundf(ty / kGazeStep)));
+	g_gazeCell = 1 + (iy + half) * kGazeSteps + (ix + half);
+}
+
+bool EFP_TargetInfo(uintptr_t rtv, int* width, int* height, int* format)
+{
+	AcquireSRWLockShared(&g_lock);
+	auto it = g_targets.find((SIZE_T)rtv);
+	bool found = it != g_targets.end();
+	if (found) {
+		*width = it->second.Width;
+		*height = it->second.Height;
+		*format = it->second.Format;
+	}
+	ReleaseSRWLockShared(&g_lock);
+	return found;
+}
 
 void EFP_FoveationEye(int eye, int width, int height, float left, float right, float up, float down)
 {

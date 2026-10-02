@@ -83,3 +83,30 @@ void EFP_InputGrip(int hand, float value);
 bool EFP_Census();          // Census = 1
 void EFP_InstallCensus(ID3D12Device* device);
 void EFP_CensusFrame();     // after each frame
+
+// Per-pass GPU timing labelled by shader, sampled every 20 s (efp_passes.cpp).
+bool EFP_PassTiming();       // PassTiming = 1 (live)
+void EFP_InstallPasses(ID3D12Device* device, ID3D12CommandQueue* queue);
+void EFP_PassesFrame();      // after each frame
+void EFP_PassesNotePso(void* pso, uint64_t shaderHash);   // from the pipeline-creation hooks
+// Skip = hash,hash,... (live): draws and dispatches whose pixel/compute shader has one of these
+// hashes (as the passes lines name them) aren't executed, to measure what an effect costs.
+void EFP_SetSkip(const char* list);
+// a render-target view's size and format, if efp_foveation saw it created
+bool EFP_TargetInfo(uintptr_t rtv, int* width, int* height, int* format);
+
+// Echo's own code and globals (efp_patch.cpp): Patch = rva:old:new (at load, checked),
+// Poke = rva:type:value (written after every frame, live), Peek = rva:bytes (logged once, live).
+void EFP_ApplyPatches(const char* spec);
+void EFP_SetPokes(const char* spec);
+void EFP_SetPeek(const char* spec);
+void EFP_PatchFrame();       // after each frame
+
+// Eye-tracked foveation (efp_gaze.cpp): the gaze through XR_EXT_eye_gaze_interaction moves the
+// full-rate region of efp_foveation's shading-rate images. GazeFoveation = 1 (default).
+bool EFP_GazeFoveation();
+bool EFP_GazeInit(XrInstance instance);          // our action set and binding; false: no gaze
+XrActionSet EFP_GazeActionSet();                 // to attach and sync with Revive's, or null
+void EFP_GazeAttach(XrSession session);          // after the action sets are attached (null: detached)
+void EFP_GazeUpdate(XrSession session, XrSpace viewSpace, XrTime time);   // each frame, after xrSyncActions
+void EFP_FoveationGaze(bool valid, float tx, float ty);                     // gaze direction as tangents
