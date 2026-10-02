@@ -1,0 +1,651 @@
+diff --git a/ReviveXR/Common.h b/ReviveXR/Common.h
+index 6baac79..4594a7f 100644
+--- a/ReviveXR/Common.h
++++ b/ReviveXR/Common.h
+@@ -36,11 +36,14 @@ extern XrResult g_LastResult;
+         )
+ #endif
+ 
++// EchoFramePCVR: failed OpenXR calls are written to runtime.log with the call and line.
++#include "efp.h"
++
+ #define CHK_XR(x) \
+ 	{ \
+ 		g_LastResult = (x); \
+ 		assertmsg(XR_SUCCEEDED(g_LastResult), ResultToString(g_LastResult)); \
+-		if (XR_FAILED(g_LastResult)) return ResultToOvrResult(g_LastResult); \
++		if (XR_FAILED(g_LastResult)) { EFP_LogXrFail(#x, (int)g_LastResult, __FILE__, __LINE__); return ResultToOvrResult(g_LastResult); } \
+ 	}
+ 
+ #define CHK_OVR(x) \
+diff --git a/ReviveXR/InputManager.cpp b/ReviveXR/InputManager.cpp
+index e6d5524..70b0c1f 100644
+--- a/ReviveXR/InputManager.cpp
++++ b/ReviveXR/InputManager.cpp
+@@ -30,17 +30,40 @@ InputManager::InputManager(XrInstance instance)
+ 	{
+ 		device->GetActiveSets(m_ActionSets);
+ 
+-		std::vector<XrActionSuggestedBinding> bindings;
+-		XrPath profile = device->GetSuggestedBindings(bindings);
+-		if (!profile)
+-			continue;
+-
+-		XrInteractionProfileSuggestedBinding suggestedBinding = XR_TYPE(INTERACTION_PROFILE_SUGGESTED_BINDING);
+-		suggestedBinding.countSuggestedBindings = (uint32_t)bindings.size();
+-		suggestedBinding.suggestedBindings = bindings.data();
+-		suggestedBinding.interactionProfile = profile;
+-		XrResult rs = xrSuggestInteractionProfileBindings(instance, &suggestedBinding);
+-		assert(XR_SUCCEEDED(rs));
++		// EchoFramePCVR: a device may suggest bindings for several profiles; the runtime
++		// binds whichever suits the controllers best. On SteamVR the Touch profile is
++		// suggested next to Index, since SteamVR has Touch bindings for controllers it
++		// can't map from Index (the Steam Frame's).
++		for (int layout = 0; ; layout++)
++		{
++			std::vector<XrActionSuggestedBinding> bindings;
++			XrPath profile = device->GetSuggestedBindings(bindings, layout);
++			if (!profile)
++				break;
++
++			XrInteractionProfileSuggestedBinding suggestedBinding = XR_TYPE(INTERACTION_PROFILE_SUGGESTED_BINDING);
++			suggestedBinding.countSuggestedBindings = (uint32_t)bindings.size();
++			suggestedBinding.suggestedBindings = bindings.data();
++			suggestedBinding.interactionProfile = profile;
++			XrResult rs = xrSuggestInteractionProfileBindings(instance, &suggestedBinding);
++			char name[XR_MAX_PATH_LENGTH] = "";
++			uint32_t length = 0;
++			xrPathToString(instance, profile, sizeof(name), &length, name);
++			EFP_Log("bindings suggested for %s: %s", name, XR_SUCCEEDED(rs) ? "ok" : "rejected");
++		}
++	}
++}
++
++void InputManager::LogInteractionProfiles(XrInstance instance, XrSession session)
++{
++	for (int i = 0; i < ovrHand_Count; i++)
++	{
++		XrInteractionProfileState state = XR_TYPE(INTERACTION_PROFILE_STATE);
++		char name[XR_MAX_PATH_LENGTH] = "none";
++		uint32_t length = 0;
++		if (XR_SUCCEEDED(xrGetCurrentInteractionProfile(session, s_SubActionPaths[i], &state)) && state.interactionProfile)
++			xrPathToString(instance, state.interactionProfile, sizeof(name), &length, name);
++		EFP_Log("%s hand bound to %s", i == ovrHand_Left ? "left" : "right", name);
+ 	}
+ }
+ 
+@@ -435,20 +458,28 @@ void InputManager::OculusTouch::UpdateHaptics(XrSession session, XrDuration disp
+ 	}
+ }
+ 
+-XrPath InputManager::OculusTouch::GetSuggestedBindings(std::vector<XrActionSuggestedBinding>& outBindings) const
++XrPath InputManager::OculusTouch::GetSuggestedBindings(std::vector<XrActionSuggestedBinding>& outBindings, int layout) const
+ {
+ 	std::string prefixes[ovrHand_Count] = { "/user/hand/left", "/user/hand/right" };
+ 
++	// EchoFramePCVR: layout 0 is the runtime's preferred profile (as before), layout 1 adds
++	// Touch after Index on SteamVR.
++	const bool steamVR = Runtime::Get().UseHack(Runtime::HACK_VALVE_INDEX_PROFILE);
++	if (layout > 1 || (layout == 1 && !steamVR))
++		return XR_NULL_PATH;
++	const bool indexProfile = steamVR && layout == 0;
++	const bool wmrProfile = Runtime::Get().UseHack(Runtime::HACK_WMR_PROFILE) && layout == 0;
++
+ #define ADD_BINDING(action, path) outBindings.push_back(XrActionSuggestedBinding{ action, GetXrPath(path) })
+ 
+-	if (Runtime::Get().UseHack(Runtime::HACK_WMR_PROFILE))
++	if (wmrProfile)
+ 	{
+ 		ADD_BINDING(m_Button_Enter, "/user/hand/left/input/menu/click");
+ 		ADD_BINDING(m_Button_Home, "/user/hand/right/input/menu/click");
+ 	}
+ 	else
+ 	{
+-		if (Runtime::Get().UseHack(Runtime::HACK_VALVE_INDEX_PROFILE))
++		if (indexProfile)
+ 		{
+ 			ADD_BINDING(m_Button_Enter, "/user/hand/left/input/trackpad/force");
+ 			ADD_BINDING(m_Button_AX, "/user/hand/left/input/a/click");
+@@ -474,7 +505,7 @@ XrPath InputManager::OculusTouch::GetSuggestedBindings(std::vector<XrActionSugge
+ 
+ 	for (int i = 0; i < ovrHand_Count; i++)
+ 	{
+-		if (Runtime::Get().UseHack(Runtime::HACK_WMR_PROFILE))
++		if (wmrProfile)
+ 		{
+ 			ADD_BINDING(m_Trackpad_Buttons, prefixes[i] + "/input/trackpad/y");
+ 			ADD_BINDING(m_Button_AX, prefixes[i] + "/input/trackpad/click");
+@@ -493,7 +524,7 @@ XrPath InputManager::OculusTouch::GetSuggestedBindings(std::vector<XrActionSugge
+ 			ADD_BINDING(m_Thumbstick, prefixes[i] + "/input/thumbstick");
+ 			ADD_BINDING(m_Button_Thumb, prefixes[i] + "/input/thumbstick/click");
+ 			ADD_BINDING(m_Touch_Thumb, prefixes[i] + "/input/thumbstick/touch");
+-			if (Runtime::Get().UseHack(Runtime::HACK_VALVE_INDEX_PROFILE))
++			if (indexProfile)
+ 				ADD_BINDING(m_Touch_ThumbRest, prefixes[i] + "/input/trackpad/touch");
+ 			else
+ 				ADD_BINDING(m_Touch_ThumbRest, prefixes[i] + "/input/thumbrest/touch");
+@@ -508,9 +539,9 @@ XrPath InputManager::OculusTouch::GetSuggestedBindings(std::vector<XrActionSugge
+ 
+ #undef ADD_BINDING
+ 
+-	if (Runtime::Get().UseHack(Runtime::HACK_VALVE_INDEX_PROFILE))
++	if (indexProfile)
+ 		return GetXrPath("/interaction_profiles/valve/index_controller");
+-	else if (Runtime::Get().UseHack(Runtime::HACK_WMR_PROFILE))
++	else if (wmrProfile)
+ 		return GetXrPath("/interaction_profiles/microsoft/motion_controller");
+ 	else
+ 		return GetXrPath("/interaction_profiles/oculus/touch_controller");
+@@ -755,8 +786,11 @@ InputManager::XboxGamepad::~XboxGamepad()
+ {
+ }
+ 
+-XrPath InputManager::XboxGamepad::GetSuggestedBindings(std::vector<XrActionSuggestedBinding>& outBindings) const
++XrPath InputManager::XboxGamepad::GetSuggestedBindings(std::vector<XrActionSuggestedBinding>& outBindings, int layout) const
+ {
++	if (layout > 0)
++		return XR_NULL_PATH;
++
+ #define ADD_BINDING(action, path) outBindings.push_back(XrActionSuggestedBinding{ action, GetXrPath(std::string("/user/gamepad") + path) })
+ 
+ 	ADD_BINDING(m_Button_A, "/input/a/click");
+diff --git a/ReviveXR/InputManager.h b/ReviveXR/InputManager.h
+index ea0ec1f..1aa3faf 100644
+--- a/ReviveXR/InputManager.h
++++ b/ReviveXR/InputManager.h
+@@ -24,7 +24,7 @@ public:
+ 		virtual void GetInputState(XrSession session, ovrControllerType controllerType, ovrInputState* inputState) = 0;
+ 
+ 		// Bindings
+-		virtual XrPath GetSuggestedBindings(std::vector<XrActionSuggestedBinding>& outBindings) const { return XR_NULL_PATH; }
++		virtual XrPath GetSuggestedBindings(std::vector<XrActionSuggestedBinding>& outBindings, int layout) const { return XR_NULL_PATH; }
+ 		virtual void GetActionSpaces(XrSession session, std::vector<XrSpace>& outSpaces) const { }
+ 		virtual void GetActiveSets(std::vector<XrActiveActionSet>& outSets) const { }
+ 
+@@ -72,7 +72,7 @@ public:
+ 		virtual ovrControllerType GetType() const override;
+ 		virtual bool IsConnected() const override;
+ 		virtual void GetInputState(XrSession session, ovrControllerType controllerType, ovrInputState* inputState) override;
+-		virtual XrPath GetSuggestedBindings(std::vector<XrActionSuggestedBinding>& outBindings) const override;
++		virtual XrPath GetSuggestedBindings(std::vector<XrActionSuggestedBinding>& outBindings, int layout) const override;
+ 		virtual void GetActionSpaces(XrSession session, std::vector<XrSpace>& outSpaces) const override;
+ 		virtual void GetActiveSets(std::vector<XrActiveActionSet>& outSets) const override;
+ 
+@@ -140,7 +140,7 @@ public:
+ 		virtual ovrControllerType GetType() const override { return ovrControllerType_XBox; }
+ 		virtual bool IsConnected() const override { return true; }
+ 		virtual void GetInputState(XrSession session, ovrControllerType controllerType, ovrInputState* inputState) override;
+-		virtual XrPath GetSuggestedBindings(std::vector<XrActionSuggestedBinding>& outBindings) const override;
++		virtual XrPath GetSuggestedBindings(std::vector<XrActionSuggestedBinding>& outBindings, int layout) const override;
+ 		virtual void GetActiveSets(std::vector<XrActiveActionSet>& outSets) const override;
+ 		virtual ovrResult SetVibration(XrSession session, ovrControllerType controllerType, float frequency, float amplitude) override;
+ 
+@@ -179,6 +179,7 @@ public:
+ 	ovrResult GetControllerVibrationState(ovrSession session, ovrControllerType controllerType, ovrHapticsPlaybackState* outState);
+ 
+ 	void GetTrackingState(ovrSession session, ovrTrackingState* outState, double absTime);
++	static void LogInteractionProfiles(XrInstance instance, XrSession session);   // EchoFramePCVR
+ 	ovrResult GetDevicePoses(ovrSession session, ovrTrackedDeviceType* deviceTypes, int deviceCount, double absTime, ovrPoseStatef* outDevicePoses);
+ 
+ protected:
+diff --git a/ReviveXR/REV_CAPI.cpp b/ReviveXR/REV_CAPI.cpp
+index 3b6f180..96f049d 100644
+--- a/ReviveXR/REV_CAPI.cpp
++++ b/ReviveXR/REV_CAPI.cpp
+@@ -19,7 +19,7 @@
+ #include <shared_mutex>
+ #include <thread>
+ #include <chrono>
+-#include <detours/detours.h>
++// EchoFramePCVR: no Detours (see REV_CAPI_D3D.cpp)
+ 
+ XrInstance g_Instance = XR_NULL_HANDLE;
+ std::list<ovrHmdStruct> g_Sessions;
+@@ -144,6 +144,8 @@ OVR_PUBLIC_FUNCTION(ovrHmdDesc) ovr_GetHmdDesc(ovrSession session)
+ 
+ 	strcpy_s(desc.ProductName, 64, "Oculus Rift S");
+ 	strcpy_s(desc.Manufacturer, 64, props.runtimeName);
++	// EchoFramePCVR: Echo sends this in its login request; OpenXR has no serial number
++	strcpy_s(desc.SerialNumber, 24, EFP_HmdSerial());
+ 
+ 	if (session->SystemProperties.trackingProperties.orientationTracking)
+ 		desc.AvailableTrackingCaps |= ovrTrackingCap_Orientation;
+@@ -226,14 +228,10 @@ OVR_PUBLIC_FUNCTION(void) ovr_Destroy(ovrSession session)
+ 
+ 	session->DestroySession();
+ 
+-	if (!session->HookedFunctions.empty())
+-	{
+-		DetourTransactionBegin();
+-		DetourUpdateThread(GetCurrentThread());
+-		for (auto it : session->HookedFunctions)
+-		DetourDetach(it.first, it.second);
+-		DetourTransactionCommit();
+-	}
++	// EchoFramePCVR: put back the vtable slots swapped in ovr_CreateTextureSwapChainDX
++	for (auto it : session->HookedFunctions)
++		EFP_RestoreVirtual(it.first, it.second);
++	session->HookedFunctions.clear();
+ 
+ 	// Delete the session from the list of sessions
+ 	g_Sessions.erase(std::find_if(g_Sessions.begin(), g_Sessions.end(), [session](ovrHmdStruct const& o) { return &o == session; }));
+@@ -293,6 +291,7 @@ OVR_PUBLIC_FUNCTION(ovrResult) ovr_GetSessionStatus(ovrSession session, ovrSessi
+ 					break;
+ 				}
+ 				session->SessionStatus = status;
++				EFP_Log("session state %d", (int)stateChanged.state);
+ 
+ 				if (stateChanged.state == XR_SESSION_STATE_READY)
+ 					session->BeginSession();
+@@ -317,6 +316,10 @@ OVR_PUBLIC_FUNCTION(ovrResult) ovr_GetSessionStatus(ovrSession session, ovrSessi
+ 			session->SessionStatus = status;
+ 			break;
+ 		}
++		case XR_TYPE_EVENT_DATA_INTERACTION_PROFILE_CHANGED:
++			// EchoFramePCVR: which controller profile each hand got ("none": no binding, no tracking)
++			InputManager::LogInteractionProfiles(session->Instance, session->Session);
++			break;
+ 		case XR_TYPE_EVENT_DATA_VISIBILITY_MASK_CHANGED_KHR:
+ 		{
+ 			const XrEventDataVisibilityMaskChangedKHR& maskChange =
+@@ -836,10 +839,18 @@ OVR_PUBLIC_FUNCTION(ovrSizei) ovr_GetFovTextureSize(ovrSession session, ovrEyeTy
+ 	REV_TRACE(ovr_GetFovTextureSize);
+ 
+ 	// TODO: Add support for pixelsPerDisplayPixel
++	// EchoFramePCVR: RenderScale in echoframe.ini sizes the eye textures (performance knob).
++	const float scale = EFP_RenderScale();
+ 	ovrSizei size = {
+-		(int)(session->PixelsPerTan[eye].x * (fov.LeftTan + fov.RightTan)),
+-		(int)(session->PixelsPerTan[eye].y * (fov.UpTan + fov.DownTan)),
++		(int)(session->PixelsPerTan[eye].x * (fov.LeftTan + fov.RightTan) * scale),
++		(int)(session->PixelsPerTan[eye].y * (fov.UpTan + fov.DownTan) * scale),
+ 	};
++	static bool logged[ovrEye_Count];
++	if (!logged[eye])
++	{
++		logged[eye] = true;
++		EFP_Log("%s eye texture %dx%d (RenderScale %.2f)", eye == ovrEye_Left ? "left" : "right", size.w, size.h, scale);
++	}
+ 	return size;
+ }
+ 
+@@ -1155,6 +1166,7 @@ OVR_PUBLIC_FUNCTION(ovrResult) ovr_EndFrame(ovrSession session, long long frameI
+ 	endInfo.layerCount = (uint32_t)layers.size();
+ 	endInfo.layers = layers.data();
+ 	CHK_XR(xrEndFrame(session->Session, &endInfo));
++	EFP_FrameSubmitted(TargetFrame->predictedDisplayPeriod);
+ 
+ 	MicroProfileFlip();
+ 
+diff --git a/ReviveXR/REV_CAPI_D3D.cpp b/ReviveXR/REV_CAPI_D3D.cpp
+index 19791e4..81072a1 100644
+--- a/ReviveXR/REV_CAPI_D3D.cpp
++++ b/ReviveXR/REV_CAPI_D3D.cpp
+@@ -6,7 +6,6 @@
+ #include "SwapchainD3D12.h"
+ #include "XR_Math.h"
+ 
+-#include <detours/detours.h>
+ #include <wrl/client.h>
+ #include <vector>
+ #include <algorithm>
+@@ -19,14 +18,13 @@ using Microsoft::WRL::ComPtr;
+ #include <d3d12.h>
+ #include <openxr/openxr_platform.h>
+ 
+-LONG DetourVirtual(PVOID pInstance, UINT methodPos, PVOID *ppPointer, PVOID pDetour)
++// EchoFramePCVR: the hooks below swap vtable slots (EFP_HookVirtual) instead of patching
++// the functions' code with Detours. Under Proton on the Steam Frame, DXVK and vkd3d-proton
++// may be ARM64EC code, which an x86-64 code patch would corrupt.
++static void HookVirtual(ovrSession session, void* instance, unsigned slot, void* hook, void** original)
+ {
+-	if (!pInstance || !ppPointer)
+-		return ERROR_INVALID_PARAMETER;
+-
+-	LPVOID* pVMT = *((LPVOID**)pInstance);
+-	*ppPointer = pVMT[methodPos];
+-	return DetourAttach(ppPointer, pDetour);
++	if (void** address = EFP_HookVirtual(instance, slot, hook, original))
++		session->HookedFunctions.insert(std::make_pair(address, *original));
+ }
+ 
+ typedef HRESULT(WINAPI* _CreateShaderResourceView)(
+@@ -159,15 +157,10 @@ OVR_PUBLIC_FUNCTION(ovrResult) ovr_CreateTextureSwapChainDX(ovrSession session,
+ 			if (pDevice->GetFeatureLevel() < graphicsReq.minFeatureLevel)
+ 				return ovrError_IncompatibleGPU;
+ 
+-			DetourTransactionBegin();
+-			DetourUpdateThread(GetCurrentThread());
+ 			// Hook D3D11 functions so we can ensure NULL descriptors keep working on typeless formats
+ 			// This fixes Echo Arena, among others.
+-			DetourVirtual(pDevice.Get(), 7, (PVOID*)&TrueCreateShaderResourceView, HookCreateShaderResourceView);
+-			session->HookedFunctions.insert(std::make_pair((PVOID*)&TrueCreateShaderResourceView, HookCreateShaderResourceView));
+-			DetourVirtual(pDevice.Get(), 9, (PVOID*)&TrueCreateRenderTargetView, HookCreateRenderTargetView);
+-			session->HookedFunctions.insert(std::make_pair((PVOID*)&TrueCreateRenderTargetView, HookCreateRenderTargetView));
+-			DetourTransactionCommit();
++			HookVirtual(session, pDevice.Get(), 7, (void*)HookCreateShaderResourceView, (void**)&TrueCreateShaderResourceView);
++			HookVirtual(session, pDevice.Get(), 9, (void*)HookCreateRenderTargetView, (void**)&TrueCreateRenderTargetView);
+ 
+ 			XrGraphicsBindingD3D11KHR graphicsBinding = XR_TYPE(GRAPHICS_BINDING_D3D11_KHR);
+ 			graphicsBinding.device = pDevice.Get();
+@@ -195,13 +188,9 @@ OVR_PUBLIC_FUNCTION(ovrResult) ovr_CreateTextureSwapChainDX(ovrSession session,
+ 
+ 			// Hook D3D12 functions so we can ensure NULL descriptors keep working on typeless formats
+ 			// This fixes Echo Arena, among others.
+-			DetourTransactionBegin();
+-			DetourUpdateThread(GetCurrentThread());
+-			DetourVirtual(pDevice12.Get(), 18, (PVOID*)&TrueCreateShaderResourceView12, HookCreateShaderResourceView12);
+-			session->HookedFunctions.insert(std::make_pair((PVOID*)&TrueCreateShaderResourceView12, HookCreateShaderResourceView12));
+-			DetourVirtual(pDevice12.Get(), 20, (PVOID*)&TrueCreateRenderTargetView12, HookCreateRenderTargetView12);
+-			session->HookedFunctions.insert(std::make_pair((PVOID*)&TrueCreateRenderTargetView12, HookCreateRenderTargetView12));
+-			DetourTransactionCommit();
++			HookVirtual(session, pDevice12.Get(), 18, (void*)HookCreateShaderResourceView12, (void**)&TrueCreateShaderResourceView12);
++			HookVirtual(session, pDevice12.Get(), 20, (void*)HookCreateRenderTargetView12, (void**)&TrueCreateRenderTargetView12);
++			EFP_Log("D3D12 session: queue %p, feature level 0x%x", pQueue.Get(), (unsigned)levels.MaxSupportedFeatureLevel);
+ 
+ 			XrGraphicsBindingD3D12KHR graphicsBinding = XR_TYPE(GRAPHICS_BINDING_D3D12_KHR);
+ 			graphicsBinding.device = pDevice12.Get();
+diff --git a/ReviveXR/Runtime.cpp b/ReviveXR/Runtime.cpp
+index 9ac774a..646f9ce 100644
+--- a/ReviveXR/Runtime.cpp
++++ b/ReviveXR/Runtime.cpp
+@@ -34,7 +34,10 @@ Runtime::HackInfo Runtime::s_known_hacks[] = {
+ 	{ nullptr, "SteamVR/OpenXR", HACK_BROKEN_LINE_LOOP, 0, 0x100000000, true },
+ 	{ nullptr, "SteamVR/OpenXR", HACK_MIN_HAPTIC_DURATION, 0, 0, true },
+ 	{ nullptr, "Windows Mixed Reality Runtime", HACK_WAIT_FOR_SESSION_READY, 0, 0, true },
++	// EchoFramePCVR: SteamVR only locates views once a session is running, like WMR.
++	{ nullptr, "SteamVR/OpenXR", HACK_WAIT_FOR_SESSION_READY, 0, 0, true },
+ 	{ "echovr.exe", nullptr, HACK_FORCE_FOV_FALLBACK, 0, 0, true },
++	{ "echovr_openxr.exe", nullptr, HACK_FORCE_FOV_FALLBACK, 0, 0, true },
+ 	{ "loneecho.exe", nullptr, HACK_FORCE_FOV_FALLBACK, 0, 0, true },
+ };
+ 
+@@ -56,6 +59,10 @@ ovrResult Runtime::CreateInstance(XrInstance* out_Instance, const ovrInitParams*
+ 	for (XrExtensionProperties& props : properties)
+ 		props = XR_TYPE(EXTENSION_PROPERTIES);
+ 	CHK_XR(xrEnumerateInstanceExtensionProperties(nullptr, (uint32_t)properties.size(), &size, properties.data()));
++	std::string offered;
++	for (const XrExtensionProperties& props : properties)
++		offered += std::string(" ") + props.extensionName;
++	EFP_Log("runtime offers %u extensions:%s", size, offered.c_str());
+ 
+ 	m_extensions.clear();
+ 
+@@ -81,7 +88,9 @@ ovrResult Runtime::CreateInstance(XrInstance* out_Instance, const ovrInitParams*
+ 	ColorSpace = Supports(XR_FB_COLOR_SPACE_EXTENSION_NAME);
+ 
+ 	XrInstanceCreateInfo createInfo = XR_TYPE(INSTANCE_CREATE_INFO);
+-	createInfo.applicationInfo = { "Revive", REV_VERSION_INT, "Revive", REV_VERSION_INT, XR_CURRENT_API_VERSION };
++	// EchoFramePCVR: ask for OpenXR 1.0. The SDK's current version is 1.1, which 1.0-only
++	// runtimes (SteamVR, including the Steam Frame's) reject with XR_ERROR_API_VERSION_UNSUPPORTED.
++	createInfo.applicationInfo = { "Revive", REV_VERSION_INT, "Revive", REV_VERSION_INT, XR_API_VERSION_1_0 };
+ 	createInfo.enabledExtensionCount = (uint32_t)m_extensions.size();
+ 	createInfo.enabledExtensionNames = m_extensions.data();
+ 	CHK_XR(xrCreateInstance(&createInfo, out_Instance));
+@@ -92,6 +101,11 @@ ovrResult Runtime::CreateInstance(XrInstance* out_Instance, const ovrInitParams*
+ 
+ 	XrInstanceProperties props = XR_TYPE(INSTANCE_PROPERTIES);
+ 	CHK_XR(xrGetInstanceProperties(*out_Instance, &props));
++	EFP_Log("OpenXR runtime: %s %u.%u.%u, game %s asks for LibOVR 1.%u", props.runtimeName,
++		(unsigned)XR_VERSION_MAJOR(props.runtimeVersion), (unsigned)XR_VERSION_MINOR(props.runtimeVersion),
++		(unsigned)XR_VERSION_PATCH(props.runtimeVersion), filename, MinorVersion);
++	for (const char* extension : m_extensions)
++		EFP_Log("  extension: %s", extension);
+ 
+ 	for (auto& hack : s_known_hacks)
+ 	{
+diff --git a/ReviveXR/Session.cpp b/ReviveXR/Session.cpp
+index 33ff2dc..2ba97ce 100644
+--- a/ReviveXR/Session.cpp
++++ b/ReviveXR/Session.cpp
+@@ -29,12 +29,15 @@ ovrResult ovrHmdStruct::InitSession(XrInstance instance)
+ 	SystemColorSpace = XR_TYPE(SYSTEM_COLOR_SPACE_PROPERTIES_FB);
+ 
+ 	// Initialize view structures
++	// EchoFramePCVR: chain the EPIC fov struct only when that extension is enabled; SteamVR
++	// rejects a next-chain struct from a disabled extension (XR_ERROR_VALIDATION_FAILURE).
++	const bool epicFov = Runtime::Get().Supports(XR_EPIC_VIEW_CONFIGURATION_FOV_EXTENSION_NAME);
+ 	for (int i = 0; i < ovrEye_Count; i++)
+ 	{
+ 		ViewConfigs[i] = XR_TYPE(VIEW_CONFIGURATION_VIEW);
+ 		ViewFov[i] = XR_TYPE(VIEW_CONFIGURATION_VIEW_FOV_EPIC);
+ 		ViewPoses[i] = XR_TYPE(VIEW);
+-		ViewConfigs[i].next = &ViewFov[i];
++		ViewConfigs[i].next = epicFov ? &ViewFov[i] : nullptr;
+ 	}
+ 
+ 	XrSystemGetInfo systemInfo = XR_TYPE(SYSTEM_GET_INFO);
+@@ -47,6 +50,8 @@ ovrResult ovrHmdStruct::InitSession(XrInstance instance)
+ 	uint32_t numViews;
+ 	CHK_XR(xrEnumerateViewConfigurationViews(Instance, System, XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO, ovrEye_Count, &numViews, ViewConfigs));
+ 	assert(numViews == ovrEye_Count);
++	EFP_Log("system: %s, recommended eye size %ux%u", SystemProperties.systemName,
++		ViewConfigs[0].recommendedImageRectWidth, ViewConfigs[0].recommendedImageRectHeight);
+ 
+ 	XrGraphicsRequirementsD3D11KHR graphicsReq = XR_TYPE(GRAPHICS_REQUIREMENTS_D3D11_KHR);
+ 	CHK_XR(GetD3D11GraphicsRequirementsKHR(Instance, System, &graphicsReq));
+@@ -56,9 +61,20 @@ ovrResult ovrHmdStruct::InitSession(XrInstance instance)
+ 		"The adapter LUID needs to fit in ovrGraphicsLuid");
+ 	memcpy(&Adapter, &graphicsReq.adapterLuid, sizeof(ovrGraphicsLuid));
+ 
++	// Until a session runs, these stand in: about 100 degrees each way, eyes 64 mm apart.
++	for (int i = 0; i < ovrEye_Count; i++)
++	{
++		ViewPoses[i].fov = { -0.87f, 0.87f, 0.87f, -0.87f };
++		ViewPoses[i].pose = XR::Posef::Identity();
++		ViewPoses[i].pose.position.x = i == ovrEye_Left ? -0.032f : 0.032f;
++	}
++	bounds = { 2.0f, 2.0f };
++	bool viewsKnown = false;
++
+ 	// Create a temporary session to retrieve the headset field-of-view
++	EFP_HmdCache cache;
+ 	Microsoft::WRL::ComPtr<IDXGIFactory1> pFactory = NULL;
+-	if (Runtime::Get().MinorVersion >= 17 && Runtime::Get().Supports(XR_EPIC_VIEW_CONFIGURATION_FOV_EXTENSION_NAME) &&
++	if (Runtime::Get().MinorVersion >= 17 && epicFov &&
+ 		!Runtime::Get().UseHack(Runtime::HACK_FORCE_FOV_FALLBACK))
+ 	{
+ 		for (int i = 0; i < ovrEye_Count; i++)
+@@ -66,6 +82,21 @@ ovrResult ovrHmdStruct::InitSession(XrInstance instance)
+ 			ViewPoses[i].fov = ViewFov[i].recommendedFov;
+ 			ViewPoses[i].pose = XR::Posef::Identity();
+ 		}
++		viewsKnown = true;
++	}
++	// EchoFramePCVR: the views a session located on an earlier launch, so no temporary
++	// session is made (a second session in one process is a risk on some runtimes).
++	else if (EFP_UseHmdCache() && EFP_LoadHmdCache(&cache) && CacheMatches(cache))
++	{
++		for (int i = 0; i < ovrEye_Count; i++)
++		{
++			ViewPoses[i].fov = cache.Fov[i];
++			ViewPoses[i].pose = cache.Pose[i];
++		}
++		bounds = cache.Bounds;
++		viewsKnown = true;
++		HmdCacheValid = true;
++		EFP_Log("hmd cache: using hmd_cache.txt, no temporary session");
+ 	}
+ 	else if (SUCCEEDED(CreateDXGIFactory1(__uuidof(IDXGIFactory1), (void**)&pFactory)))
+ 	{
+@@ -82,48 +113,71 @@ ovrResult ovrHmdStruct::InitSession(XrInstance instance)
+ 			}
+ 		}
+ 
++		// EchoFramePCVR: no adapter matched the runtime's LUID (SteamVR's null driver
++		// reports none): let D3D11 pick the hardware adapter.
+ 		HRESULT hr = D3D11CreateDevice(pAdapter.Get(),
+-			D3D_DRIVER_TYPE_UNKNOWN, 0, 0,
++			pAdapter ? D3D_DRIVER_TYPE_UNKNOWN : D3D_DRIVER_TYPE_HARDWARE, 0, 0,
+ 			NULL, 0, D3D11_SDK_VERSION,
+ 			&pDevice, nullptr, nullptr);
+-		assert(SUCCEEDED(hr));
+-
+ 		XrGraphicsBindingD3D11KHR graphicsBinding = XR_TYPE(GRAPHICS_BINDING_D3D11_KHR);
+ 		graphicsBinding.device = pDevice.Get();
+-		CHK_OVR(StartSession(&graphicsBinding));
+-
+-		if (Runtime::Get().UseHack(Runtime::HACK_WAIT_FOR_SESSION_READY))
++		// EchoFramePCVR: a temporary session that fails leaves the stand-in views above (and
++		// the real session corrects the cache later) instead of failing ovr_Create.
++		if (FAILED(hr))
++			EFP_Log("temporary session: D3D11CreateDevice failed (0x%08lx), using stand-in views", hr);
++		else if (OVR_FAILURE(StartSession(&graphicsBinding)))
++			EFP_Log("temporary session: couldn't start, using stand-in views");
++		else
+ 		{
+-			// Synchronously wait for the fake session to become ready.
+-			XrEventDataBuffer event;
+-			const XrEventDataSessionStateChanged& stateChanged =
+-				reinterpret_cast<XrEventDataSessionStateChanged&>(event);
+-			do
++			bool ready = true;
++			if (Runtime::Get().UseHack(Runtime::HACK_WAIT_FOR_SESSION_READY))
+ 			{
+-				event = XR_TYPE(EVENT_DATA_BUFFER);
+-				XrResult result = xrPollEvent(Instance, &event);
+-				if (XR_FAILED(result))
+-					break;
+-				if (result == XR_EVENT_UNAVAILABLE)
+-					std::this_thread::sleep_for(10ms);
+-			} while (event.type != XR_TYPE_EVENT_DATA_SESSION_STATE_CHANGED ||
+-				stateChanged.state != XR_SESSION_STATE_READY);
+-			assert(stateChanged.session == Session);
+-
+-			XrSessionBeginInfo beginInfo = XR_TYPE(SESSION_BEGIN_INFO);
+-			beginInfo.primaryViewConfigurationType = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
+-			CHK_XR(xrBeginSession(Session, &beginInfo));
++				// Synchronously wait for the fake session to become ready, for at most
++				// 5 s: an asleep headset never reports READY.
++				ready = false;
++				const auto start = std::chrono::steady_clock::now();
++				while (!ready && std::chrono::steady_clock::now() - start < 5s)
++				{
++					XrEventDataBuffer event = XR_TYPE(EVENT_DATA_BUFFER);
++					XrResult result = xrPollEvent(Instance, &event);
++					if (XR_FAILED(result))
++						break;
++					if (result == XR_EVENT_UNAVAILABLE)
++						std::this_thread::sleep_for(10ms);
++					else if (event.type == XR_TYPE_EVENT_DATA_SESSION_STATE_CHANGED &&
++						reinterpret_cast<XrEventDataSessionStateChanged&>(event).state == XR_SESSION_STATE_READY)
++						ready = true;
++				}
++
++				XrSessionBeginInfo beginInfo = XR_TYPE(SESSION_BEGIN_INFO);
++				beginInfo.primaryViewConfigurationType = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
++				if (!ready)
++					EFP_Log("temporary session: not READY within 5 s (headset asleep?), using stand-in views");
++				else if (XR_FAILED(xrBeginSession(Session, &beginInfo)))
++					ready = false;
++			}
++
++			XrView views[ovrEye_Count] = { XR_TYPE(VIEW), XR_TYPE(VIEW) };
++			XrViewStateFlags flags = 0;
++			if (ready && OVR_SUCCESS(LocateViews(views, &flags)) && (flags & XR_VIEW_STATE_ORIENTATION_VALID_BIT))
++			{
++				for (int i = 0; i < ovrEye_Count; i++)
++					ViewPoses[i] = views[i];
++				viewsKnown = true;
++				xrGetReferenceSpaceBoundsRect(Session, XR_REFERENCE_SPACE_TYPE_STAGE, &bounds);
++				SaveHmdCache();
++			}
++			DestroySession();
+ 		}
++	}
+ 
+-		CHK_OVR(LocateViews(ViewPoses));
++	if (!viewsKnown || !epicFov || Runtime::Get().UseHack(Runtime::HACK_FORCE_FOV_FALLBACK))
++	{
+ 		for (int i = 0; i < ovrEye_Count; i++)
+ 		{
+ 			ViewFov[i].recommendedFov = ViewPoses[i].fov;
+ 			ViewFov[i].maxMutableFov = ViewPoses[i].fov;
+ 		}
+-
+-		CHK_XR(xrGetReferenceSpaceBoundsRect(Session, XR_REFERENCE_SPACE_TYPE_STAGE, &bounds));
+-		CHK_OVR(DestroySession());
+ 	}
+ 
+ 	// Calculate the pixels per tan angle
+@@ -201,10 +255,64 @@ ovrResult ovrHmdStruct::BeginSession()
+ 	long long currentIndex = (*CurrentFrame).frameIndex;
+ 	CHK_OVR(ovr_WaitToBeginFrame(this, currentIndex));
+ 	RecenterSpace(ovrTrackingOrigin_EyeLevel, ViewSpace);
++
++	// EchoFramePCVR: no valid cache yet, so this launch ran on a temporary session or on
++	// stand-in views. Now that the game's own session runs, save what it locates for the
++	// next launch (this one keeps the views the game already built its projection from).
++	if (!HmdCacheValid)
++	{
++		XrView views[ovrEye_Count] = { XR_TYPE(VIEW), XR_TYPE(VIEW) };
++		XrViewStateFlags flags = 0;
++		if (OVR_SUCCESS(LocateViews(views, &flags)) && (flags & XR_VIEW_STATE_ORIENTATION_VALID_BIT))
++		{
++			xrGetReferenceSpaceBoundsRect(Session, XR_REFERENCE_SPACE_TYPE_STAGE, &bounds);
++			SaveHmdCache(views);
++		}
++	}
++
+ 	CHK_OVR(ovr_BeginFrame(this, currentIndex));
+ 	return ovrSuccess;
+ }
+ 
++bool ovrHmdStruct::CacheMatches(const EFP_HmdCache& cache) const
++{
++	XrInstanceProperties props = XR_TYPE(INSTANCE_PROPERTIES);
++	if (XR_FAILED(xrGetInstanceProperties(Instance, &props)) || strcmp(cache.Runtime, props.runtimeName))
++	{
++		EFP_Log("hmd cache: made with runtime '%s', ignored", cache.Runtime);
++		return false;
++	}
++	for (int i = 0; i < ovrEye_Count; i++)
++	{
++		if (cache.Width[i] != ViewConfigs[i].recommendedImageRectWidth || cache.Height[i] != ViewConfigs[i].recommendedImageRectHeight)
++		{
++			EFP_Log("hmd cache: made for %ux%u per eye, the headset now recommends %ux%u, ignored",
++				cache.Width[i], cache.Height[i], ViewConfigs[i].recommendedImageRectWidth, ViewConfigs[i].recommendedImageRectHeight);
++			return false;
++		}
++	}
++	return true;
++}
++
++void ovrHmdStruct::SaveHmdCache(const XrView views[ovrEye_Count])
++{
++	EFP_HmdCache cache = {};
++	XrInstanceProperties props = XR_TYPE(INSTANCE_PROPERTIES);
++	xrGetInstanceProperties(Instance, &props);
++	strcpy_s(cache.Runtime, props.runtimeName);
++	for (int i = 0; i < ovrEye_Count; i++)
++	{
++		const XrView& view = views ? views[i] : ViewPoses[i];
++		cache.Width[i] = ViewConfigs[i].recommendedImageRectWidth;
++		cache.Height[i] = ViewConfigs[i].recommendedImageRectHeight;
++		cache.Fov[i] = view.fov;
++		cache.Pose[i] = view.pose;
++	}
++	cache.Bounds = bounds;
++	EFP_SaveHmdCache(cache);
++	HmdCacheValid = true;
++}
++
+ ovrResult ovrHmdStruct::EndSession()
+ {
+ 	CHK_XR(xrEndSession(Session));
+diff --git a/ReviveXR/Session.h b/ReviveXR/Session.h
+index 171f3ad..01d5a7d 100644
+--- a/ReviveXR/Session.h
++++ b/ReviveXR/Session.h
+@@ -80,6 +80,11 @@ struct ovrHmdStruct
+ 	// Input
+ 	std::unique_ptr<InputManager> Input;
+ 
++	// EchoFramePCVR: hmd_cache.txt (see efp.h)
++	bool HmdCacheValid = false;
++	bool CacheMatches(const struct EFP_HmdCache& cache) const;
++	void SaveHmdCache(const XrView views[ovrEye_Count] = nullptr);
++
+ 	ovrResult InitSession(XrInstance instance);
+ 	ovrResult StartSession(void* graphicsBinding);
+ 	ovrResult BeginSession();

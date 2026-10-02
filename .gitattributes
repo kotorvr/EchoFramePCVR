@@ -1,0 +1,4 @@
+# patches apply byte-for-byte; shell scripts run on the Frame
+*.patch -text
+*.sh text eol=lf
+*.py text eol=lf

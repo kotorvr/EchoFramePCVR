@@ -1,0 +1,7 @@
+# fetched sources (build.cmd clones and patches them)
+deps/
+# build output
+build/
+# test installs, logs, Frame recon dumps
+artifacts/
+*.log

@@ -1,0 +1,18 @@
+diff --git a/src/loader/CMakeLists.txt b/src/loader/CMakeLists.txt
+index fead046..ce9b39f 100644
+--- a/src/loader/CMakeLists.txt
++++ b/src/loader/CMakeLists.txt
+@@ -234,10 +234,12 @@ elseif(WIN32)
+         else()
+             # WindowsStore (UWP) apps must be compiled with dynamic CRT linkage (default)
+             # Otherwise for static libs, link the CRT dynamically
++            # EchoFramePCVR: the static loader goes into a /MT DLL, so it uses the static CRT too
++            # (the Steam Frame's Proton prefix has ARM64EC msvcp140/vcruntime140 that x86-64 code can't load).
+             set_target_properties(
+                 openxr_loader
+                 PROPERTIES MSVC_RUNTIME_LIBRARY
+-                           "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL"
++                           "MultiThreaded$<$<CONFIG:Debug>:Debug>"
+             )
+         endif()
+         target_compile_options(openxr_loader PRIVATE /wd6386)
