@@ -262,7 +262,7 @@ index ea0ec1f..1aa3faf 100644
  
  protected:
 diff --git a/ReviveXR/REV_CAPI.cpp b/ReviveXR/REV_CAPI.cpp
-index 3b6f180..2fefd84 100644
+index 3b6f180..38990ae 100644
 --- a/ReviveXR/REV_CAPI.cpp
 +++ b/ReviveXR/REV_CAPI.cpp
 @@ -19,7 +19,7 @@
@@ -324,7 +324,7 @@ index 3b6f180..2fefd84 100644
  		case XR_TYPE_EVENT_DATA_VISIBILITY_MASK_CHANGED_KHR:
  		{
  			const XrEventDataVisibilityMaskChangedKHR& maskChange =
-@@ -836,10 +840,18 @@ OVR_PUBLIC_FUNCTION(ovrSizei) ovr_GetFovTextureSize(ovrSession session, ovrEyeTy
+@@ -836,10 +840,19 @@ OVR_PUBLIC_FUNCTION(ovrSizei) ovr_GetFovTextureSize(ovrSession session, ovrEyeTy
  	REV_TRACE(ovr_GetFovTextureSize);
  
  	// TODO: Add support for pixelsPerDisplayPixel
@@ -336,6 +336,7 @@ index 3b6f180..2fefd84 100644
 +		(int)(session->PixelsPerTan[eye].x * (fov.LeftTan + fov.RightTan) * scale),
 +		(int)(session->PixelsPerTan[eye].y * (fov.UpTan + fov.DownTan) * scale),
  	};
++	EFP_FoveationEye(eye, size.w, size.h, fov.LeftTan, fov.RightTan, fov.UpTan, fov.DownTan);
 +	static bool logged[ovrEye_Count];
 +	if (!logged[eye])
 +	{
@@ -345,7 +346,7 @@ index 3b6f180..2fefd84 100644
  	return size;
  }
  
-@@ -901,7 +913,9 @@ OVR_PUBLIC_FUNCTION(ovrResult) ovr_WaitToBeginFrame(ovrSession session, long lon
+@@ -901,7 +914,9 @@ OVR_PUBLIC_FUNCTION(ovrResult) ovr_WaitToBeginFrame(ovrSession session, long lon
  	assert(session->CurrentFrame.is_lock_free());
  	XrIndexedFrameState* frameState = &session->FrameStats[frameIndex % ovrMaxProvidedFrameStats];
  	XrFrameWaitInfo waitInfo = XR_TYPE(FRAME_WAIT_INFO);
@@ -355,7 +356,7 @@ index 3b6f180..2fefd84 100644
  	frameState->frameIndex = frameIndex;
  	session->CurrentFrame = frameState;
  
-@@ -926,6 +940,7 @@ OVR_PUBLIC_FUNCTION(ovrResult) ovr_BeginFrame(ovrSession session, long long fram
+@@ -926,6 +941,7 @@ OVR_PUBLIC_FUNCTION(ovrResult) ovr_BeginFrame(ovrSession session, long long fram
  
  	XrFrameBeginInfo beginInfo = XR_TYPE(FRAME_BEGIN_INFO);
  	CHK_XR(xrBeginFrame(session->Session, &beginInfo));
@@ -363,18 +364,19 @@ index 3b6f180..2fefd84 100644
  	return ovrSuccess;
  }
  
-@@ -1154,7 +1169,9 @@ OVR_PUBLIC_FUNCTION(ovrResult) ovr_EndFrame(ovrSession session, long long frameI
+@@ -1154,7 +1170,10 @@ OVR_PUBLIC_FUNCTION(ovrResult) ovr_EndFrame(ovrSession session, long long frameI
  	endInfo.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
  	endInfo.layerCount = (uint32_t)layers.size();
  	endInfo.layers = layers.data();
 +	EFP_TimingEndFrame(frameIndex);
  	CHK_XR(xrEndFrame(session->Session, &endInfo));
 +	EFP_TimingFrameSubmitted(TargetFrame->predictedDisplayPeriod);
++	EFP_FoveationFrame();
  
  	MicroProfileFlip();
  
 diff --git a/ReviveXR/REV_CAPI_D3D.cpp b/ReviveXR/REV_CAPI_D3D.cpp
-index 19791e4..c88555d 100644
+index 19791e4..de6026c 100644
 --- a/ReviveXR/REV_CAPI_D3D.cpp
 +++ b/ReviveXR/REV_CAPI_D3D.cpp
 @@ -6,7 +6,6 @@
@@ -424,7 +426,7 @@ index 19791e4..c88555d 100644
  
  			XrGraphicsBindingD3D11KHR graphicsBinding = XR_TYPE(GRAPHICS_BINDING_D3D11_KHR);
  			graphicsBinding.device = pDevice.Get();
-@@ -195,13 +188,11 @@ OVR_PUBLIC_FUNCTION(ovrResult) ovr_CreateTextureSwapChainDX(ovrSession session,
+@@ -195,13 +188,12 @@ OVR_PUBLIC_FUNCTION(ovrResult) ovr_CreateTextureSwapChainDX(ovrSession session,
  
  			// Hook D3D12 functions so we can ensure NULL descriptors keep working on typeless formats
  			// This fixes Echo Arena, among others.
@@ -440,6 +442,7 @@ index 19791e4..c88555d 100644
 +			EFP_Log("D3D12 session: queue %p, feature level 0x%x", pQueue.Get(), (unsigned)levels.MaxSupportedFeatureLevel);
 +			EFP_InstallFp64Workaround(pDevice12.Get());
 +			EFP_TimingStart(pQueue.Get());
++			EFP_InstallFoveation(pDevice12.Get(), pQueue.Get());
  
  			XrGraphicsBindingD3D12KHR graphicsBinding = XR_TYPE(GRAPHICS_BINDING_D3D12_KHR);
  			graphicsBinding.device = pDevice12.Get();

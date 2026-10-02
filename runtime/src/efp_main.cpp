@@ -13,6 +13,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <algorithm>
 
 void AttachDetours() {}
 void DetachDetours() {}
@@ -26,6 +27,7 @@ static bool g_hmdCache = true;
 static char g_serial[24];
 static bool g_fp64Dump;
 static bool g_frameTiming = true;
+static int g_foveation = 2;
 
 static FILE* OpenInDir(const wchar_t* name, const wchar_t* mode)
 {
@@ -70,6 +72,7 @@ bool EFP_UnderWine()
 float EFP_RenderScale() { return g_renderScale; }
 bool EFP_Fp64Dump() { return g_fp64Dump; }
 bool EFP_FrameTiming() { return g_frameTiming; }
+int EFP_Foveation() { return g_foveation; }
 
 void EFP_DumpShader(const char* stage, uint64_t hash, const void* code, size_t size)
 {
@@ -123,6 +126,8 @@ static void ReadSettings()
 			g_fp64Dump = atoi(value) != 0;
 		else if (!_stricmp(key, "FrameTiming"))
 			g_frameTiming = atoi(value) != 0;
+		else if (!_stricmp(key, "Foveation"))
+			g_foveation = std::min(3, std::max(0, atoi(value)));
 		else if (!_stricmp(key, "HmdSerial"))
 			strncpy_s(g_serial, value, _TRUNCATE);
 	}
@@ -216,8 +221,8 @@ BOOL APIENTRY DllMain(HANDLE module, DWORD reason, LPVOID)
 		if (FILE* f = OpenInDir(L"runtime.log", L"w")) fclose(f);      // a fresh log per launch
 		ReadSettings();
 		EFP_Log("EchoFramePCVR runtime loaded (LibOVR on OpenXR, ReviveXR)%s", EFP_UnderWine() ? ", under Wine/Proton" : "");
-		EFP_Log("settings: RenderScale %.2f, HmdCache %d, FrameTiming %d, HmdSerial %s", g_renderScale, g_hmdCache ? 1 : 0,
-		        g_frameTiming ? 1 : 0, EFP_HmdSerial());
+		EFP_Log("settings: RenderScale %.2f, HmdCache %d, FrameTiming %d, Foveation %d, HmdSerial %s", g_renderScale,
+		        g_hmdCache ? 1 : 0, g_frameTiming ? 1 : 0, g_foveation, EFP_HmdSerial());
 	}
 	return TRUE;
 }

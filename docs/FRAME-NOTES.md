@@ -138,3 +138,48 @@ User report: lobby visible, controllers work, playable in the menu space, but:
   - SteamVR rejects `thumbrest/touch` for this profile. Rejected paths are now found one at a time and left out instead of losing the whole profile.
   - Not yet checked in the headset: the log line saying which profile each hand bound to.
 
+## 90 Hz, foveation, and what's left to try (2026-10-02, later)
+
+- **90 Hz works.** SteamVR on the Frame switches the display to 72 Hz for any app unless the app's own SteamVR setting says otherwise; the home runs at 120. That setting is `steam.app.<shortcut id>.preferredRefreshRate`, set through vrcmd. EchoFrame found that `xrRequestDisplayRefreshRateFB` is ignored on the Frame.
+  - `frame.py refresh [HZ]` shows or sets it; `frame.py install` sets 90.
+  - The display offers 72, 80, 90, 96, 100 and 120 Hz.
+  - The menu space holds 90.0 fps: GPU 6.8 ms against an 11.1 ms frame.
+  - The compositor log names the reason: "HMD driver recommended: 2160x2160 90.0Hz HiddenArea(15.64%)", with a raw render target scale of 0.64, which is where 1728 comes from.
+- **Echo's render targets.** Both eyes are rendered side by side into 3456×1728 targets in formats 10 (R16G16B16A16_FLOAT), 13, 26 (R11G11B10_FLOAT), 28 and 29 (R8G8B8A8). There are also 1728×864 half-resolution targets and a 1280×720 mirror window. No views are made before the hooks.
+- **Foveated rendering through D3D12 VRS** (`efp_foveation.cpp`, `Foveation = 0..3`, default 2):
+  - vkd3d-proton reports tier 2 with 8×8 tiles, but **no 4×4 rate**, so 2×2 is the coarsest;
+  - every eye-sized target gets an image with full rate inside a cone around each eye's axis and 2×2 outside it;
+  - menu space at 90 Hz: GPU 6.8 → 6.2 ms with 95% of the tiles at 2×2, and the same at the strong level.
+  - So pixel shading is a small part of the cost here. On this tile-based GPU in sysmem mode, the cost per pixel looks like memory bandwidth (render-target writes and reads), which VRS doesn't reduce. The lobby may shade more heavily; measure it there.
+- **More menu-space A/Bs at 90 Hz** (GPU ms; baseline 6.8 without foveation, 6.2 with it):
+
+  | change | GPU ms |
+  |---|---|
+  | `multires` true (Echo's stencil mask) | 6.3, no gain; the log still says "Multi-Res: Disabled" |
+  | `multires` + `msaa` 1 | 11.3 (MSAA is expensive) |
+  | `sharpening` 0 | 7.6, worse or noise |
+  | `-legacyvis` | 7.8, worse |
+
+- **Research (subagents, 2026-10-02):**
+  - **Echo's settings.** Settings are read at 0xC2E400. `adaptiveresminscale` is clamped to [0.01, 1], so adaptive resolution can go down to 0.5. Echo's adaptive target is 90 fps for the Rift CV1 that Revive reports.
+  - **No lower presets.** There is no LOD bias or draw-distance key. `meshes` 0..2 sets the LOD globals at RVA 0x20AFBC8/BC0/BD4.
+  - **Quest content isn't usable.** The exe has the Quest "lowspec" path, which loads `<level>_lowspec` levels; the PC data has none of them, and Quest data (ASTC textures, android resource types) can't be loaded.
+  - **Post effects are level data.** SSAO, fog, light shafts and bloom are set per level, not in the settings; changing them needs an asset patch or a hook.
+  - **Valve's eye-tracked foveation layer.** It is already loaded into Echo: `VK_LAYER_VALVE_fdm_injection` (fragment density map, gaze from `xrGetFoveationEyeTrackedStateMETA`) plus `VK_LAYER_VALVE_rpo`. It stays idle unless `FDM_DEBUG=enable` (and `RPO_DEBUG=enable`) is set; Steam sets those per app, but not for our shortcut. Turnip has `fragmentDensityMap`, the offset extension and the layered extension.
+  - **Gaze for our own runtime.** `XR_EXT_eye_gaze_interaction` passes through wineopenxr, which doesn't filter or need thunks for it, if we want our own gaze-driven VRS. The eye-tracking server runs at 15 to 90 Hz.
+  - **Half-rate reprojection.** SteamVR can run Echo at half rate with reprojection without app changes (per-app Motion Smoothing). `XR_EXT_frame_synthesis` would need motion vectors plus depth.
+  - **Per-pass profiling without code.** Turnip: `MESA_GPU_TRACES=print_csv MESA_GPU_TRACEFILE=/home/steamos/tu.csv` gives per-render-pass GPU times with `tiledRender`. vkd3d: `VKD3D_QUEUE_PROFILE=Z:\home\steamos\q.json`, `VKD3D_SHADER_DUMP_PATH`, and `VKD3D_SHADER_OVERRIDE` (to swap in cheaper SPIR-V by vkd3d hash).
+  - **Two shader hashes.** vkd3d's hash is FNV-1 (multiply, then xor); ours in efp_fp64 is FNV-1a, which is why the names in the two logs differ.
+- **Wireless.** The Frame's adbd has no TCP mode (`adb tcpip` is refused). sshd runs and takes the `id_rsa_frame_devkit` key that Frame Control installed, so `frame.py` falls back to SSH at the last Wi-Fi address it saw (`artifacts/frame_host`, or `EFP_SSH=steamos@host`).
+- **Straight into a match.** Use the echovrce Discord bot's `/create` (Private Arena Match, Private Combat Match or Private Social Lobby), which answers with `spark://c/<uuid>`, then run `frame.py join <link>` (Echo's `-lobbyid`). Offline `-level` starts need patched DLLs.
+
+### Next steps (performance, in order)
+
+1. **In the lobby or a private arena** (`frame.py join`), one session, with the GPU line each time:
+   - `Foveation` 0 vs 2;
+   - `FDM_DEBUG=enable` with Foveation 0, then with `RPO_DEBUG=enable` too;
+   - adaptive resolution on with `adaptiveresminscale` 0.5;
+   - TAA off.
+2. **The no-code per-pass trace** in the lobby (`MESA_GPU_TRACES`), to see which passes cost the most; then hook or skip them, or override their shaders.
+3. **Half rate with reprojection** as the fallback for 90/120 Hz, and `XR_EXT_eye_gaze_interaction` gaze for our VRS if Valve's FDM layer doesn't do it.
+

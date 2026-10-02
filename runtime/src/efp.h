@@ -59,3 +59,10 @@ void EFP_TimingBeginFrame(long long frameIndex);   // after xrBeginFrame
 void EFP_TimingCommit(double waitedMs);            // time in xrWaitSwapchainImage
 void EFP_TimingEndFrame(long long frameIndex);     // just before xrEndFrame
 void EFP_TimingFrameSubmitted(int64_t predictedDisplayPeriodNs);   // after xrEndFrame
+
+// Fixed foveated rendering through D3D12 variable-rate shading (efp_foveation.cpp).
+int EFP_Foveation();         // Foveation = 0 off, 1 light, 2 medium, 3 strong
+void EFP_InstallFoveation(ID3D12Device* device, ID3D12CommandQueue* queue);
+// each eye's texture size and field of view (tangents), as Echo asks for them
+void EFP_FoveationEye(int eye, int width, int height, float left, float right, float up, float down);
+void EFP_FoveationFrame();   // after each frame: logs the render targets Echo binds, for a while

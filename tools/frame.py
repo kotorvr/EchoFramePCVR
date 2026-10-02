@@ -7,6 +7,9 @@
   frame.py launch [KEY=VALUE...] [ECHO_ARGS...]
                                       starts Echo on the Frame (stopping a running one first), with
                                       extra environment variables and arguments (e.g. TU_DEBUG=sysmem)
+  frame.py join SPARK_LINK            starts Echo straight into an echovrce session from the Discord
+                                      bot's /create (private arena, combat or social lobby)
+  frame.py refresh [HZ]               shows or sets Echo's display rate (72, 80, 90, 96, 100, 120)
   frame.py stop                       ends Echo's session (Echo, its crash reporter, Wine)
   frame.py graphics [KEY=VALUE...]    shows or sets Echo's graphics settings on the Frame (Echo stopped);
                                       "frame" applies the Frame profile (no adaptive res, 72 fps, no MSAA)
@@ -14,7 +17,8 @@
   frame.py logs                       pulls every log into artifacts/logs/<time>/
   frame.py shell CMD...               runs a command in the Frame's shell
 
-The Frame's adb is a SteamOS shell as the logged-in user. Echo goes to
+The Frame's adb is a SteamOS shell as the logged-in user. Off USB, every command goes over
+Wi-Fi by SSH instead (the address saved the last time the Frame was on USB, or EFP_SSH). Echo goes to
 ~/EchoVR/ready-at-dawn-echo-arena and runs from a non-Steam shortcut ("Echo VR (PCVR)")
 under Proton for ARM64, which runs x86-64 Windows code with FEX.
 """
@@ -62,7 +66,23 @@ def run(*args, timeout=None, check=True):
     return p.stdout
 
 
+# Without USB (the Frame charging on the wall), commands go over Wi-Fi through SSH as steamos.
+# The Frame's adbd has no TCP mode, but its sshd runs and takes the key Frame Control installs.
+# The address is saved whenever the Frame is on USB; EFP_SSH=user@host and EFP_SSH_KEY override.
+HOST_FILE = os.path.join(REPO, "artifacts", "frame_host")
+SSH_KEY = os.environ.get("EFP_SSH_KEY", os.path.join(os.path.expanduser("~"), ".ssh", "id_rsa_frame_devkit"))
+SSH_OPTS = ["-i", SSH_KEY, "-o", "BatchMode=yes", "-o", "ConnectTimeout=8", "-o", "StrictHostKeyChecking=accept-new"]
+
+
+def ssh_ok(host):
+    p = subprocess.run(["ssh", *SSH_OPTS, host, "grep -s ^ID= /etc/os-release"], capture_output=True, text=True, timeout=20)
+    return "steamos" in p.stdout
+
+
 def find_frame():
+    """The adb serial of a Frame on USB, or "ssh:user@host" for one on Wi-Fi."""
+    if os.environ.get("EFP_SSH"):
+        return "ssh:" + os.environ["EFP_SSH"]
     serial = os.environ.get("EFP_SERIAL")
     if serial:
         return serial
@@ -70,22 +90,53 @@ def find_frame():
         parts = line.split()
         if len(parts) >= 2 and parts[1] == "device":
             if "steamos" in run("-s", parts[0], "shell", "grep -s ^ID= /etc/os-release", check=False):
+                ip = run("-s", parts[0], "shell", "ip -4 -o addr show wlan0 | awk '{print $4}' | cut -d/ -f1", check=False).strip()
+                if ip:
+                    os.makedirs(os.path.dirname(HOST_FILE), exist_ok=True)
+                    with open(HOST_FILE, "w") as f:
+                        f.write(f"steamos@{ip}\n")
                 return parts[0]
+    if os.path.exists(HOST_FILE) and os.path.exists(SSH_KEY):
+        host = open(HOST_FILE).read().strip()
+        if ssh_ok(host):
+            return "ssh:" + host
+        sys.exit(f"no Steam Frame on USB, and SSH to {host} (last Wi-Fi address) doesn't answer")
     sys.exit("no Steam Frame on adb: turn on Developer Mode and plug it in (or adb connect its address)")
 
 
 SERIAL = None
 
 
+def over_ssh():
+    return SERIAL.startswith("ssh:")
+
+
 def sh(command, timeout=None, check=True):
-    return run("-s", SERIAL, "shell", command, timeout=timeout, check=check)
+    if not over_ssh():
+        return run("-s", SERIAL, "shell", command, timeout=timeout, check=check)
+    p = subprocess.run(["ssh", *SSH_OPTS, SERIAL[4:], command], capture_output=True, text=True,
+                       encoding="utf-8", errors="replace", timeout=timeout)
+    if check and p.returncode:
+        sys.exit(f"ssh {command[:60]} failed: {(p.stderr or p.stdout).strip()[-400:]}")
+    return p.stdout
 
 
 def push(local, remote, sync=False, timeout=None):
-    args = ["-s", SERIAL, "push"] + (["--sync"] if sync else []) + [local, remote]
-    p = subprocess.run([ADB, *args], timeout=timeout)
+    if over_ssh():
+        if sync:
+            sys.exit("push-game needs the Frame on USB")
+        p = subprocess.run(["scp", "-q", *SSH_OPTS, local, f"{SERIAL[4:]}:{remote}"], timeout=timeout)
+    else:
+        args = ["-s", SERIAL, "push"] + (["--sync"] if sync else []) + [local, remote]
+        p = subprocess.run([ADB, *args], timeout=timeout)
     if p.returncode:
         sys.exit(f"copying {local} failed")
+
+
+def pull(remote, dest):
+    if over_ssh():
+        return subprocess.run(["scp", "-q", *SSH_OPTS, f"{SERIAL[4:]}:{remote}", dest], capture_output=True, text=True)
+    return subprocess.run([ADB, "-s", SERIAL, "pull", remote, dest], capture_output=True, text=True)
 
 
 def remote_path(path):
@@ -100,6 +151,28 @@ def throttle_off():
              f"{VRCMD} --settings-int steamvr.powersaveFramesToThrottle 2>&1 | tail -1", check=False)
     if "=0" not in out:
         print(f"warning: couldn't turn SteamVR's power-save throttling off: {out.strip()[-160:]}")
+
+
+# The display rate while Echo runs. SteamVR on the Frame picks 72 Hz for an app unless the app's
+# own SteamVR setting asks otherwise (the home runs at 120); xrRequestDisplayRefreshRateFB is
+# ignored there. The app key is steam.app.<shortcut id>. 72, 80, 90, 96, 100 and 120 Hz exist.
+DEFAULT_REFRESH = 90
+
+
+def refresh_rate(hz=None):
+    shortcut = sh(f"cat '{remote_path(STATE)}/shortcut.id' 2>/dev/null", check=False).strip()
+    if not shortcut.isdigit():
+        sys.exit("no shortcut yet: run frame.py install first")
+    key = f"steam.app.{shortcut}.preferredRefreshRate"
+    if hz is not None:
+        sh(f"{VRCMD} --set-settings-float {key} {float(hz)} 2>&1 | tail -1", check=False)
+    out = sh(f"{VRCMD} --settings-float {key} 2>&1 | tail -1", check=False).strip()
+    return out.split("=")[-1] if "=" in out else ""
+
+
+def cmd_refresh(args):
+    value = refresh_rate(float(args[0]) if args else None)
+    print(f"Echo's display rate: {value or 'SteamVR default (72 Hz)'}")
 
 
 def steam(*args, timeout=60):
@@ -187,7 +260,10 @@ def cmd_install(args):
     tool = os.environ.get("EFP_PROTON", "proton_11-arm64")
     print("configure:", steam("configure", shortcut, tool, LAUNCH_OPTIONS))
     throttle_off()
-    print(f"installed; shortcut {shortcut} runs EchoFrame.exe with {tool}")
+    rate = refresh_rate()
+    if not rate or rate.startswith("0"):
+        rate = refresh_rate(DEFAULT_REFRESH)
+    print(f"installed; shortcut {shortcut} runs EchoFrame.exe with {tool} at {rate} Hz")
 
 
 def game_id():
@@ -227,6 +303,20 @@ def cmd_launch(args):
         sys.exit("Steam didn't take the launch options; is the Frame on its home screen?")
     sh(f"date +%s > '{remote_path(STATE)}/launched'; nohup steam steam://rungameid/{gid} >/dev/null 2>&1 &")
     print(f"started game {gid}; logs with: frame.py logs")
+
+
+def cmd_join(args):
+    """Starts Echo straight into an echovrce session: a private arena, combat match or social
+    lobby made with the echovrce Discord bot's /create (mode: Private Arena Match, Private
+    Combat Match or Private Social Lobby), which answers with a spark://c/<id> link. Echo's
+    -lobbyid joins that session when it starts. KEY=VALUE arguments as for launch."""
+    import re
+    ids = [m for a in args for m in re.findall(r"[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}", a)]
+    if not ids:
+        sys.exit("usage: frame.py join <spark link or session id> [KEY=VALUE...]")
+    env = [a for a in args if "=" in a and not a.startswith("-") and "://" not in a]
+    cmd_launch(env + ["-lobbyid", ids[0].upper()])
+    print(f"joining echovrce session {ids[0].upper()}")
 
 
 WAIT_PROBE = r'''
@@ -328,7 +418,7 @@ def cmd_logs(args):
         files.append(f"{home}/.local/share/Steam/logs/{name}")
     files += sh(f"ls -t {home}/.local/share/Steam/logs/xrclient_* 2>/dev/null | head -3", check=False).split()
     for f in files:
-        p = subprocess.run([ADB, "-s", SERIAL, "pull", f, dest], capture_output=True, text=True)
+        p = pull(f, dest)
         print(("  " if p.returncode == 0 else "  (missing) ") + f)
     print(f"logs in {dest}")
 
@@ -343,7 +433,7 @@ def main():
         print(__doc__)
         return
     commands = {"recon": cmd_recon, "push-game": cmd_push_game, "install": cmd_install,
-                "launch": cmd_launch, "stop": cmd_stop, "wait": cmd_wait, "graphics": cmd_graphics, "logs": cmd_logs, "shell": cmd_shell}
+                "launch": cmd_launch, "join": cmd_join, "refresh": cmd_refresh, "stop": cmd_stop, "wait": cmd_wait, "graphics": cmd_graphics, "logs": cmd_logs, "shell": cmd_shell}
     if sys.argv[1] not in commands:
         sys.exit(f"unknown command {sys.argv[1]}")
     SERIAL = find_frame()
