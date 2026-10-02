@@ -278,7 +278,7 @@ index 3b6f180..96f049d 100644
  	MicroProfileFlip();
  
 diff --git a/ReviveXR/REV_CAPI_D3D.cpp b/ReviveXR/REV_CAPI_D3D.cpp
-index 19791e4..81072a1 100644
+index 19791e4..6fc27c9 100644
 --- a/ReviveXR/REV_CAPI_D3D.cpp
 +++ b/ReviveXR/REV_CAPI_D3D.cpp
 @@ -6,7 +6,6 @@
@@ -328,7 +328,7 @@ index 19791e4..81072a1 100644
  
  			XrGraphicsBindingD3D11KHR graphicsBinding = XR_TYPE(GRAPHICS_BINDING_D3D11_KHR);
  			graphicsBinding.device = pDevice.Get();
-@@ -195,13 +188,9 @@ OVR_PUBLIC_FUNCTION(ovrResult) ovr_CreateTextureSwapChainDX(ovrSession session,
+@@ -195,13 +188,10 @@ OVR_PUBLIC_FUNCTION(ovrResult) ovr_CreateTextureSwapChainDX(ovrSession session,
  
  			// Hook D3D12 functions so we can ensure NULL descriptors keep working on typeless formats
  			// This fixes Echo Arena, among others.
@@ -342,6 +342,7 @@ index 19791e4..81072a1 100644
 +			HookVirtual(session, pDevice12.Get(), 18, (void*)HookCreateShaderResourceView12, (void**)&TrueCreateShaderResourceView12);
 +			HookVirtual(session, pDevice12.Get(), 20, (void*)HookCreateRenderTargetView12, (void**)&TrueCreateRenderTargetView12);
 +			EFP_Log("D3D12 session: queue %p, feature level 0x%x", pQueue.Get(), (unsigned)levels.MaxSupportedFeatureLevel);
++			EFP_InstallFp64Workaround(pDevice12.Get());
  
  			XrGraphicsBindingD3D12KHR graphicsBinding = XR_TYPE(GRAPHICS_BINDING_D3D12_KHR);
  			graphicsBinding.device = pDevice12.Get();
@@ -649,3 +650,70 @@ index 171f3ad..01d5a7d 100644
  	ovrResult InitSession(XrInstance instance);
  	ovrResult StartSession(void* graphicsBinding);
  	ovrResult BeginSession();
+diff --git a/ReviveXR/Swapchain.cpp b/ReviveXR/Swapchain.cpp
+index 477ca09..4d2b33f 100644
+--- a/ReviveXR/Swapchain.cpp
++++ b/ReviveXR/Swapchain.cpp
+@@ -8,6 +8,21 @@
+ 
+ ovrResult ovrTextureSwapChainData::Commit(ovrSession session)
+ {
++	// EchoFramePCVR: the image acquire deferred from Init (the game rendered into image 0)
++	if (!Acquired)
++	{
++		uint32_t index = 0;
++		XrSwapchainImageAcquireInfo acquireInfo = XR_TYPE(SWAPCHAIN_IMAGE_ACQUIRE_INFO);
++		CHK_XR(xrAcquireSwapchainImage(Swapchain, &acquireInfo, &index));
++		XrSwapchainImageWaitInfo waitInfo = XR_TYPE(SWAPCHAIN_IMAGE_WAIT_INFO);
++		waitInfo.timeout = XR_INFINITE_DURATION;
++		CHK_XR(xrWaitSwapchainImage(Swapchain, &waitInfo));
++		if (index != CurrentIndex)
++			EFP_Log("swapchain: first image acquired is %u, the game rendered into %u", index, CurrentIndex);
++		CurrentIndex = index;
++		Acquired = true;
++	}
++
+ 	XrSwapchainImageReleaseInfo releaseInfo = XR_TYPE(SWAPCHAIN_IMAGE_RELEASE_INFO);
+ 	CHK_XR(xrReleaseSwapchainImage(Swapchain, &releaseInfo));
+ 
+@@ -62,12 +77,27 @@ ovrResult ovrTextureSwapChainData::Init(XrSession session, const ovrTextureSwapC
+ 	createInfo.mipCount = desc->MipLevels;
+ 	CHK_XR(xrCreateSwapchain(session, &createInfo, &Swapchain));
+ 
++	// EchoFramePCVR: SteamVR on Linux (the Steam Frame's) refuses an acquire before the session
++	// is running (XR_ERROR_CALL_ORDER_INVALID). Then the game renders into image 0 and the
++	// acquire happens at its first commit, when the session runs.
++	CurrentIndex = 0;
+ 	XrSwapchainImageAcquireInfo acqInfo = XR_TYPE(SWAPCHAIN_IMAGE_ACQUIRE_INFO);
+-	CHK_XR(xrAcquireSwapchainImage(Swapchain, &acqInfo, &CurrentIndex));
++	XrResult rs = xrAcquireSwapchainImage(Swapchain, &acqInfo, &CurrentIndex);
++	if (rs == XR_ERROR_CALL_ORDER_INVALID)
++	{
++		static bool logged;
++		if (!logged)
++			EFP_Log("swapchain: runtime won't hand out images before the session runs; acquiring at the first commit");
++		logged = true;
++		CurrentIndex = 0;
++		return ovrSuccess;
++	}
++	CHK_XR(rs);
+ 
+ 	XrSwapchainImageWaitInfo waitInfo = XR_TYPE(SWAPCHAIN_IMAGE_WAIT_INFO);
+ 	waitInfo.timeout = XR_NO_DURATION;
+ 	CHK_XR(xrWaitSwapchainImage(Swapchain, &waitInfo));
++	Acquired = true;
+ 	return ovrSuccess;
+ }
+ 
+diff --git a/ReviveXR/Swapchain.h b/ReviveXR/Swapchain.h
+index 37cbf8f..57b0762 100644
+--- a/ReviveXR/Swapchain.h
++++ b/ReviveXR/Swapchain.h
+@@ -22,6 +22,7 @@ struct ovrTextureSwapChainData
+ 	XrSwapchainImageBaseHeader* Images;
+ 	uint32_t Length;
+ 	uint32_t CurrentIndex;
++	bool Acquired = false;   // EchoFramePCVR: the first acquire can wait for the session (see Init)
+ 
+ 	virtual ovrResult Commit(ovrSession session);
+ 

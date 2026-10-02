@@ -35,5 +35,10 @@ void EFP_SaveHmdCache(const EFP_HmdCache& cache);
 void** EFP_HookVirtual(void* instance, unsigned slot, void* hook, void** original);
 void EFP_RestoreVirtual(void** slotAddress, void* original);
 
+// GPUs without double-precision shaders (the Steam Frame's): stub the pixel and compute
+// shaders that need them instead of letting pipeline creation fail (efp_fp64.cpp).
+struct ID3D12Device;
+void EFP_InstallFp64Workaround(ID3D12Device* device);
+
 // Frame pacing summary in runtime.log, every 10 s while frames are submitted.
 void EFP_FrameSubmitted(int64_t predictedDisplayPeriodNs);

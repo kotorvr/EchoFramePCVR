@@ -47,15 +47,18 @@ set OVR=deps\ovr_sdk_pc\LibOVR
 if not exist build\obj mkdir build\obj
 if not exist build\out mkdir build\out
 
-set INC=/Iruntime\src /I%EXT%\microprofile /I%EXT%\glad\include /I%EXT%\Vulkan\include /Ideps\OpenXR-SDK\include /I%OVR%\Include /Ideps\Revive\ReviveOverlay
+set INC=/Iruntime\src /Ibuild\obj /I%EXT%\microprofile /I%EXT%\glad\include /I%EXT%\Vulkan\include /Ideps\OpenXR-SDK\include /I%OVR%\Include /Ideps\Revive\ReviveOverlay
 set DEF=/DXR_USE_PLATFORM_WIN32 /DVK_NO_PROTOTYPES /DVK_USE_PLATFORM_WIN32_KHR /DNOMINMAX /DMICROPROFILE_ENABLED=0 /DMICROPROFILE_GPU_TIMERS=0 /DOVR_DLL_BUILD /DNDEBUG /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE
 set SRC=%REV%\Common.cpp %REV%\HapticsBuffer.cpp %REV%\InputManager.cpp %REV%\REV_CAPI.cpp %REV%\REV_CAPI_Audio.cpp
 set SRC=%SRC% %REV%\REV_CAPI_D3D.cpp %REV%\REV_CAPI_GL.cpp %REV%\REV_CAPI_Vk.cpp %REV%\Session.cpp %REV%\Runtime.cpp
 set SRC=%SRC% %REV%\Swapchain.cpp %REV%\SwapchainD3D11.cpp %REV%\SwapchainD3D12.cpp %REV%\SwapchainGL.cpp %REV%\SwapchainVk.cpp
-set SRC=%SRC% %REV%\microprofile.cpp %OVR%\Shim\OVR_CAPI_Util.cpp %OVR%\Shim\OVR_StereoProjection.cpp runtime\src\efp_main.cpp
+set SRC=%SRC% %REV%\microprofile.cpp %OVR%\Shim\OVR_CAPI_Util.cpp %OVR%\Shim\OVR_StereoProjection.cpp runtime\src\efp_main.cpp runtime\src\efp_fp64.cpp
 set LIBS=build\openxr\src\loader\openxr_loader.lib Ws2_32.lib opengl32.lib d3d11.lib d3d12.lib dxgi.lib dxguid.lib dsound.lib
 set LIBS=%LIBS% Winmm.lib Shlwapi.lib Pathcch.lib user32.lib advapi32.lib ole32.lib shell32.lib cfgmgr32.lib
 
+rem stub shaders for GPUs without double precision (runtime\src\efp_fp64.cpp)
+fxc /nologo /T ps_5_0 /E main /Vn g_StubPS /Fh build\obj\stub_ps.h runtime\shaders\stub_ps.hlsl >nul || exit /b 1
+fxc /nologo /T cs_5_0 /E main /Vn g_StubCS /Fh build\obj\stub_cs.h runtime\shaders\stub_cs.hlsl >nul || exit /b 1
 cl /nologo /c /MT /O2 /W1 %INC% %DEF% /Fobuild\obj\glad.obj %EXT%\glad\src\glad.c || exit /b 1
 cl /nologo /LD /MT /O2 /EHsc /std:c++17 /W1 /MP /FIchrono %INC% %DEF% /Fobuild\obj\ /Febuild\out\LibOVRRT64_1.dll %SRC% build\obj\glad.obj /link %LIBS% || exit /b 1
 
