@@ -15,6 +15,7 @@
                                       "frame" applies the Frame profile (no adaptive res, 72 fps, no MSAA)
   frame.py ini [KEY=VALUE...]         shows or sets the runtime's echoframe.ini on the Frame; Foveation
                                       and VelocityLog take effect while Echo runs
+  frame.py tudebug [FLAGS]            shows or sets Turnip's live debug flags (e.g. sysmem, gmem, nolrz; "" clears)
   frame.py timing [LINES]             the latest frame-timing, settings and throw lines of runtime.log
   frame.py wait [SECONDS]             follows a launch until frames flow, Echo crashes or exits
   frame.py logs                       pulls every log into artifacts/logs/<time>/
@@ -39,8 +40,10 @@ BIN = ROOT + "/bin/win10"
 STATE = "$HOME/EchoVR/efp"                  # the shortcut id and helper scripts on the Frame
 NAME = "Echo VR (PCVR)"
 VRCMD = "export XDG_RUNTIME_DIR=/run/user/$(id -u) LD_LIBRARY_PATH=/opt/steamvr/bin/linuxarm64; /opt/steamvr/bin/linuxarm64/vrcmd"
-# Proton writes $HOME/steam-<game id>.log with PROTON_LOG=1
-LAUNCH_OPTIONS = "PROTON_LOG=1 %command%"
+# Proton writes $HOME/steam-<game id>.log with PROTON_LOG=1. Turnip rereads TU_DEBUG_FILE while
+# the game runs, so its debug flags (sysmem, gmem, nolrz, ...) can be A/B'd live (frame.py tudebug).
+TUDEBUG_FILE = "/home/steamos/efp-tudebug"
+LAUNCH_OPTIONS = f"TU_DEBUG_FILE={TUDEBUG_FILE} PROTON_LOG=1 %command%"
 
 # What an Echo install needs on the Frame. bin/win10 leaves out mod loaders, plugins and logs:
 # the Frame build starts from a stock Echo.
@@ -294,11 +297,21 @@ def cmd_stop(args):
     print("stopped")
 
 
+def keep_awake():
+    """The Frame suspends (and drops off Wi-Fi) when nobody wears it for a while, which ends any
+    unattended test run. A logind block inhibitor for six hours keeps it up; launches renew it."""
+    sh(f"touch {TUDEBUG_FILE}; "   # Turnip watches it only if it exists at the start
+       "pgrep -f '[s]ystemd-inhibit --what=sleep:idle --who=EchoFramePCVR' >/dev/null || "
+       "nohup systemd-inhibit --what=sleep:idle --who=EchoFramePCVR --why='Echo tests' --mode=block "
+       "sleep 21600 >/dev/null 2>&1 &", check=False)
+
+
 def cmd_launch(args):
     """KEY=VALUE arguments go into Echo's environment (e.g. TU_DEBUG=sysmem), the rest to Echo
     itself; without any, the shortcut's launch options go back to the default."""
     stop()
     throttle_off()
+    keep_awake()
     gid = game_id()
     env = [a for a in args if "=" in a and not a.startswith("-")]
     options = " ".join([*env, LAUNCH_OPTIONS, *(a for a in args if a not in env)])
@@ -414,6 +427,12 @@ def cmd_ini(args):
     print(sh(f"grep -v -e '^#' -e '^$' '{path}'", check=False), end="")
 
 
+def cmd_tudebug(args):
+    if args:
+        sh(f"printf '%s\n' '{','.join(args)}' > {TUDEBUG_FILE}", check=False)
+    print("Turnip debug flags: " + (sh(f"cat {TUDEBUG_FILE} 2>/dev/null", check=False).strip() or "(none)"))
+
+
 def cmd_timing(args):
     n = int(args[0]) if args else 12
     log = remote_path(BIN) + "/EchoFrame/runtime.log"
@@ -451,7 +470,7 @@ def main():
         print(__doc__)
         return
     commands = {"recon": cmd_recon, "push-game": cmd_push_game, "install": cmd_install,
-                "launch": cmd_launch, "join": cmd_join, "refresh": cmd_refresh, "stop": cmd_stop, "wait": cmd_wait, "graphics": cmd_graphics, "ini": cmd_ini, "timing": cmd_timing, "logs": cmd_logs, "shell": cmd_shell}
+                "launch": cmd_launch, "join": cmd_join, "refresh": cmd_refresh, "stop": cmd_stop, "wait": cmd_wait, "graphics": cmd_graphics, "ini": cmd_ini, "tudebug": cmd_tudebug, "timing": cmd_timing, "logs": cmd_logs, "shell": cmd_shell}
     if sys.argv[1] not in commands:
         sys.exit(f"unknown command {sys.argv[1]}")
     SERIAL = find_frame()

@@ -279,7 +279,7 @@ index ea0ec1f..1aa3faf 100644
  
  protected:
 diff --git a/ReviveXR/REV_CAPI.cpp b/ReviveXR/REV_CAPI.cpp
-index 3b6f180..fe06adb 100644
+index 3b6f180..1042bf2 100644
 --- a/ReviveXR/REV_CAPI.cpp
 +++ b/ReviveXR/REV_CAPI.cpp
 @@ -19,7 +19,7 @@
@@ -389,7 +389,7 @@ index 3b6f180..fe06adb 100644
  	return ovrSuccess;
  }
  
-@@ -1154,7 +1171,11 @@ OVR_PUBLIC_FUNCTION(ovrResult) ovr_EndFrame(ovrSession session, long long frameI
+@@ -1154,7 +1171,12 @@ OVR_PUBLIC_FUNCTION(ovrResult) ovr_EndFrame(ovrSession session, long long frameI
  	endInfo.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
  	endInfo.layerCount = (uint32_t)layers.size();
  	endInfo.layers = layers.data();
@@ -398,11 +398,12 @@ index 3b6f180..fe06adb 100644
 +	EFP_TimingFrameSubmitted(TargetFrame->predictedDisplayPeriod);
 +	EFP_FoveationFrame();
 +	EFP_SettingsPoll();
++	EFP_CensusFrame();
  
  	MicroProfileFlip();
  
 diff --git a/ReviveXR/REV_CAPI_D3D.cpp b/ReviveXR/REV_CAPI_D3D.cpp
-index 19791e4..de6026c 100644
+index 19791e4..c346f7d 100644
 --- a/ReviveXR/REV_CAPI_D3D.cpp
 +++ b/ReviveXR/REV_CAPI_D3D.cpp
 @@ -6,7 +6,6 @@
@@ -452,7 +453,7 @@ index 19791e4..de6026c 100644
  
  			XrGraphicsBindingD3D11KHR graphicsBinding = XR_TYPE(GRAPHICS_BINDING_D3D11_KHR);
  			graphicsBinding.device = pDevice.Get();
-@@ -195,13 +188,12 @@ OVR_PUBLIC_FUNCTION(ovrResult) ovr_CreateTextureSwapChainDX(ovrSession session,
+@@ -195,13 +188,13 @@ OVR_PUBLIC_FUNCTION(ovrResult) ovr_CreateTextureSwapChainDX(ovrSession session,
  
  			// Hook D3D12 functions so we can ensure NULL descriptors keep working on typeless formats
  			// This fixes Echo Arena, among others.
@@ -469,6 +470,7 @@ index 19791e4..de6026c 100644
 +			EFP_InstallFp64Workaround(pDevice12.Get());
 +			EFP_TimingStart(pQueue.Get());
 +			EFP_InstallFoveation(pDevice12.Get(), pQueue.Get());
++			EFP_InstallCensus(pDevice12.Get());
  
  			XrGraphicsBindingD3D12KHR graphicsBinding = XR_TYPE(GRAPHICS_BINDING_D3D12_KHR);
  			graphicsBinding.device = pDevice12.Get();

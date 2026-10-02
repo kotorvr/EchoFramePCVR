@@ -78,3 +78,8 @@ bool EFP_VelocityLog();      // VelocityLog = 1 (live)
 void EFP_InputTrack(XrInstance instance, XrSpace handSpace, XrSpace base, int hand, double calledAt, double forTime,
                     const XrSpaceVelocity& given);
 void EFP_InputGrip(int hand, float value);
+
+// Echo's GPU copies and resolves, logged for the first minutes (efp_census.cpp).
+bool EFP_Census();          // Census = 1
+void EFP_InstallCensus(ID3D12Device* device);
+void EFP_CensusFrame();     // after each frame

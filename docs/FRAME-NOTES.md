@@ -183,3 +183,42 @@ User report: lobby visible, controllers work, playable in the menu space, but:
 2. **The no-code per-pass trace** in the lobby (`MESA_GPU_TRACES`), to see which passes cost the most; then hook or skip them, or override their shaders.
 3. **Half rate with reprojection** as the fallback for 90/120 Hz, and `XR_EXT_eye_gaze_interaction` gaze for our VRS if Valve's FDM layer doesn't do it.
 
+
+## Lobby A/Bs, Valve's FDM layer, per-pass trace (2026-10-02, evening)
+
+All numbers are runtime.log's GPU ms per frame, 1728×1728 per eye, Low preset, 90 Hz display, unless noted.
+
+- **New tools.**
+  - `echoframe.ini` is reread while Echo runs. `Foveation` and `VelocityLog` change live: `frame.py ini Foveation=0`.
+  - `frame.py timing` shows the last timing, settings and throw lines.
+  - `frame.py tudebug FLAGS` writes Turnip's `TU_DEBUG_FILE`, which Turnip rereads live (in the launch options from now on).
+  - `tools/ab_lobby.py` runs unattended A/Bs. For each config it restarts Echo into a session, waits for our player to spawn plus 25 s, and averages 40 s of timing lines. Results go to `artifacts/ab-<date>.txt`.
+  - `tools/tu_passes.py` ranks a Turnip u_trace by render pass. Run it on the Frame, because the trace grows by about 150 MB a minute.
+- **Sessions.** A `/create` private session dies as soon as its only player leaves, so every restart of Echo kills it ("join error lobby invalid").
+  - **Rejoining a public social lobby by id works.** After the user joins one once from the menu, Echo's r14log has `lobby_id` in a rich-presence line, and `frame.py join <id>` lands straight in it.
+  - `-gametype social_2.0` alone only reaches the menu.
+  - The EchoRelay patch's `-offline -level mpl_lobby_b2 -gametype Social_2.0_Private -region uscn` would give a repeatable empty lobby. It needs the patch's dbgcore.dll/EchoLoader on the Frame, which the stock Frame install leaves out. Not tried.
+- **Launch-option gotcha.** Git Bash rewrites `/home/...` in `KEY=VALUE` arguments to `C:/Program Files/Git/home/...`. The space then breaks Steam's launch command and the game exits at once. `export MSYS_NO_PATHCONV=1` first.
+- **Foveation in the lobby** (private lobby, player standing still, switched live): Foveation 0 **36 ms**, Foveation 2 **27–28 ms**. VRS saves about 25% here, against 9% in the menu. In the public lobby, with a fixed view: 36.8 vs 22.3.
+  - VRS was also being applied to 2048×2048 and 1024×1024 targets (shadow or reflection maps). Now only targets at the eye size or half of it are foveated.
+- **Valve's eye-tracked FDM layer** (`FDM_DEBUG=enable`, Foveation 0):
+  - **At first Echo wouldn't start:** "DirectX error: E_INVALIDARG". vkd3d logged "Heap too small for the texture" for the 3456×1728 depth target. The layer makes subsampled, padded images, larger than what `GetResourceAllocationInfo` reported to Echo when it laid out its heaps.
+    - Fix: with `FDM_DEBUG` set, the runtime reports eye-sized render and depth targets 1/8 bigger (device vtable slot 25).
+    - Echo creates its heaps before it hands LibOVR its device, so the hook goes in at `ovr_Initialize`, through a D3D12 device of our own. vkd3d-proton's devices share one vtable, and the same device singleton.
+  - The layer logs "created fdm views for size 1728 (108x54)", so it handles the double-wide 3456×1728 targets.
+  - **Lobby: 21.3 ms** (vs 27.8 with our VRS), but **many textures render black**. In the menu it's worse, 12.5 vs 6.8 ms: Turnip forces gmem for every pass with a density map.
+  - The likely cause of the black: subsampled images read later through ordinary samplers. vkd3d samples through bindless heaps, not subsampled immutable samplers.
+  - Not usable as is. `FDM_DEBUG` options seen in the layer: enable, debug, fdm, synth, zero, med, (low/high), disable_offsets, disable_layered, help. Also `FOVE_LEVEL` and `FDM_SWAPCHAIN_SIZE`.
+- **Valve's render-pass optimizer** (`RPO_DEBUG=enable`): no gain, 23–28 ms with Foveation 2 in the same lobby. Dropped.
+- **Public lobby, headset lying still** (fixed view, Foveation 2): base **22.3**, Foveation 0 **36.8**, TAA off **18.7**. RenderScale 0.7 + TAA off read **12.3** during an aborted run. The suite stopped when the Frame went to sleep; `frame.py launch` now holds a logind sleep inhibitor.
+- **Per-pass trace in the lobby** (`MESA_GPU_TRACES=print_csv`, Foveation 2; shares of GPU time):
+  - main pass, 3456×1728, 4 colour targets + depth, about 37 draws, gmem, stores 20 bytes/pixel: **33%**;
+  - full-screen 1-draw passes with 2 targets, load/store 8 bytes/pixel (TAA and post): **22%**;
+  - `vkCmdCopyImage`, about 10 per frame (Echo's CopyResource/CopyTextureRegion): **11%**. `Census = 1` now logs them;
+  - a 3-target + depth pass with about 13 draws, 4× per frame (transparents?): 11%;
+  - compute, about 68 dispatches per frame: 10%;
+  - 2-target, 4-byte full-screen passes: 8%;
+  - 1728×864 half-resolution passes: 4%.
+  - LRZ writes are off in most passes ("Stencil may kill fragments").
+  - On sysmem passes, load and store ops are bookkeeping only. A `DiscardResource` before a pass only helps where Turnip picks gmem.
+- **SteamVR's "Application FPS"** (172–230 while Echo shows 90.0) is not Echo's frame rate. vrcompositor's per-process summary counted 9412 presents in about 114 s, at most 90 a second. The figure matches 1000 / the app GPU time the compositor logs (`ApplicationTime GPU 3–8 ms` in the menu), so it's headroom, not frames shown. Echo is capped by `xrWaitFrame`. Nothing to fix.

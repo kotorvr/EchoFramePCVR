@@ -29,6 +29,7 @@ static bool g_fp64Dump;
 static bool g_frameTiming = true;
 static int g_foveation = 2;
 static bool g_velocityLog;
+static bool g_census = true;
 static FILETIME g_settingsTime;          // echoframe.ini's last write time, when it was last read
 
 static FILE* OpenInDir(const wchar_t* name, const wchar_t* mode)
@@ -76,6 +77,7 @@ bool EFP_Fp64Dump() { return g_fp64Dump; }
 bool EFP_FrameTiming() { return g_frameTiming; }
 int EFP_Foveation() { return g_foveation; }
 bool EFP_VelocityLog() { return g_velocityLog; }
+bool EFP_Census() { return g_census; }
 
 void EFP_DumpShader(const char* stage, uint64_t hash, const void* code, size_t size)
 {
@@ -147,6 +149,8 @@ static void ReadSettings(bool live)
 			float s = (float)atof(value);
 			if (s >= 0.25f && s <= 2.0f) g_renderScale = s;
 		}
+		else if (!_stricmp(key, "Census"))
+			g_census = atoi(value) != 0;
 		else if (!_stricmp(key, "HmdCache"))
 			g_hmdCache = atoi(value) != 0;
 		else if (!_stricmp(key, "Fp64Dump"))
