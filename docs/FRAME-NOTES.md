@@ -307,3 +307,31 @@ All numbers are runtime.log's GPU ms per frame, 1728×1728 per eye, Low preset, 
   - So in the lobby the cost is geometry (draws and vertices), which is why the LOD distance pays off.
 - **`frame.py profile 90`** sets RenderScale 0.7, Foveation 3, TAA and sharpening off, `qualitylevel 0`, the masks, LOD ×50 and the strip patch. `frame.py profile default` goes back. **Not yet looked at in the headset:** LOD ×50 may look blocky or drop objects. A milder LOD (×16, 11.4 ms) plus RenderScale 0.65 is the alternative.
 - The eye-gaze action starts ("gaze: eye gaze action ready") and the strip patch applies. Gaze foveation is untested while nobody wears the headset (the gaze is invalid, so it falls back to fixed).
+
+## Public lobby check, throw measurement, handoff (2026-10-02, late)
+
+- **LOD ×50 is out.** In the public lobby, half the level didn't draw until the user got close. The `0x20AFBC8`/`BD0`/`BD4` pokes pull in the draw distance, not just mesh detail, which is where that "saving" came from. Profile 90 no longer touches them, and the Frame's ini is back to `Poke = 20AFB84:i:0,20AFB80:i:0` (particle and light masks).
+- **User's public-lobby run** (profile 90 with LOD ×50; runtime.log in `artifacts/logs/20261002-232228`):
+  - public social lobby with other players: **GPU 12.0–12.4 ms, about 55 fps** (SteamVR dropping between 45 and 90 Hz);
+  - menu space: 7.6 ms, 89–90 fps.
+  - The public lobby costs more than the offline one (players and avatars). With LOD back to normal it will be above 12 ms. **90 in the public lobby isn't reached yet.**
+- **Eye gaze works:** valid 100% while worn, and the full-rate region moves with it. Note that it also reports "valid" with nobody wearing the headset.
+- **Throws (VelocityLog, 26 throws, menu space):**
+  - Reported linear and angular speed matches the speed from tracked positions, at 0.99–1.05× (typically 1.01×). There's no magnitude error, so EchoFrame's 1.5× boost isn't a correction here.
+  - The reported velocity lags the position-derived one by a steady **10–12 ms (one frame)**. Constant-velocity extrapolation of the "now" positions would produce the same offset, so it isn't clearly a velocity error.
+  - At release Echo got about the true speed (10.3 vs 10.6 m/s, 7.3 vs 8.0, 4.6 vs 5.5), slightly low when released before the peak.
+  - **No throw change made**, and the user wants to be asked before any. To settle the lag: locate at past times (history) as well as "now" and compare.
+- **The Frame** shut down normally at 21:16 and 23:17 (by hand or a timeout?). It also suspended at 22:48 while charging with Echo running. Unattended runs end when it sleeps; the idle inhibitor doesn't stop that.
+
+### Next steps (for the next session)
+
+1. **Public lobby to 90.** The budget is 11.1 ms (aim for about 10). It's about 12+ now with RenderScale 0.7, Foveation 3, TAA off and masks 0. Candidates:
+   - RenderScale 0.65;
+   - a mild LOD bias (×2–×4) only if it doesn't drop objects; check the draw distance in the headset;
+   - avoid Echo's depth copies (2–3 per frame, `CopyResource` R24G8 3456×1728, see the census lines);
+   - `k_main_pass_map` to R11G11B10F (`Patch = 58C0F2:448D4720:448D472F` plus `58C14B` for `k_resolve_map`). Risky: copies between targets must keep matching formats;
+   - `PassTiming = 1` during a real public-lobby visit to see what players add.
+2. **Arena numbers:** `frame.py offline arena`, then a real match.
+3. **Valve's FDM layer:** try `FDM_DEBUG=enable,disable_offsets` / `med`, or limit it to the final passes, to get rid of the black textures. It saved about 25% more than our VRS.
+4. **Throws:** past-time locate comparison, if the user wants to pursue it.
+5. **The Frame's sleep:** find what triggers it (the Steam client power setting?) so unattended runs survive.
