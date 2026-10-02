@@ -222,3 +222,50 @@ All numbers are runtime.log's GPU ms per frame, 1728×1728 per eye, Low preset, 
   - LRZ writes are off in most passes ("Stencil may kill fragments").
   - On sysmem passes, load and store ops are bookkeeping only. A `DiscardResource` before a pass only helps where Turnip picks gmem.
 - **SteamVR's "Application FPS"** (172–230 while Echo shows 90.0) is not Echo's frame rate. vrcompositor's per-process summary counted 9412 presents in about 114 s, at most 90 a second. The figure matches 1000 / the app GPU time the compositor logs (`ApplicationTime GPU 3–8 ms` in the menu), so it's headroom, not frames shown. Echo is capped by `xrWaitFrame`. Nothing to fix.
+
+### Research: Echo's renderer levers (static analysis of echovr.exe 631547, subagent)
+
+- Echo has **no cvar or console system**. Rendering is controlled by the settings JSON, a few flags (`-vrscale f`, `-msaa N`/`-nomsaa`, `-legacyvis`, `-usevrsize`, `-capture`, `-defaultsettings`) and memory patches. All addresses below are RVAs (image base 0x140000000); for `.text`, file offset = RVA − 0xC00.
+- **How the JSON is applied:**
+  - The `quality` block is parsed at 0xC2E350, the graphics block at 0xC2E8C0. 0xC31870 hands each value to a setter that writes a global.
+  - The preset filler (0xC357D0) runs only when the settings are first built. Set `qualitylevel 0` ("Custom") so the JSON `quality` values are used as written.
+  - Globals: temporalaa 0x20AF9CC, sharpening 0x20AF9E0, msaa 0x20AF9C8, multires 0x20AFB88, bloom 0x20AFB7C, volumetrics 0x20AFB6C.
+  - shadowresolution 0x20AFA04 (256–2048), cascaderesolution 0x20AFA0C (256–4096), cascadedistance 0x20AFA28 (float, no clamp).
+  - lights 0x20AFB80 = (1<<n)&7, fx 0x20AFB84 = (1<<n)&7, so **`fx 3` and `lights 3` give a mask of 0**.
+  - Textures: 0x20AFBB4/BB8/BC0. Mesh LOD: 0x20AFBC8 (distance multiplier; 1.42 at meshes 0) and 0x20AFBD0/BD4 (component LOD: distance × BD0 + BD4).
+  - `shadows` and `anims` are parsed but apparently unused.
+- **The renderer is clustered forward:** depth/normals prepass, main pass, transparents, then post. Post order is at 0x5AE5C0.
+  - The main pass writes `k_main_pass_map` (RGBA16F), `k_velocity_map` (RGBA16_SNORM, format 13) and `k_vtx_normals_map` (RGB10A2), the 20 bytes/pixel in the trace.
+  - With `sharpening > 0`, tone mapping writes `k_tone_mapped` (R11G11B10F) and an extra full-screen `fs_fxaa`/sharpen pass writes the final image. With `sharpening 0` that pass goes away.
+  - The ~10 copies per frame are probably TAA history (`k_prev_frame_map0..5`) and `k_resolve_map`.
+- **Mobile feature strip:** renderer setup (0x5862D0) zeroes a list of features when the mobile flag 0x20207A4 is set.
+  - `Patch = 5863F7:7434:9090` (a `je` that skips the zeroing, NOPed) makes it always zero them: SSAO and the normals target (0x2020780/784), solid-transparent depth prepass (798), spot-light shadows (79C), punctual shadows (78C), volumetrics (7A0), DOF and motion blur (7BC/7C0), lens flare (7C4), clustered decals (2020870).
+  - Setting the flag itself would switch to material permutations that PC data lacks.
+  - The bytes are verified in the local exe.
+- **Per frame:** the DOF/fog-blur chain runs while 0x20AFB58 (set by level script) is on: `Poke = 20AFB58:i:0`. Blended per-level post parameters live at `*(0x20A0488)` (fog +0xE0…+0x124, `shadow.maxshadowcascades` +0x250 clamped to 1–4 at 0x550FF0, lensflare +0x27C).
+- **Render-target formats:** the format table is at 0x182AE30.
+  - `k_main_pass_map` is created at 0x58C0F2 with `44 8D 47 20` (0x20 = RGBA16F → 0x2F R11G11B10F).
+  - `k_resolve_map` is at 0x58C14B.
+  - `k_velocity_map` is at 0x58C6F3 with `41 B8 1D 00 00 00`.
+  - Risky: alpha or velocity .zw may be used.
+- **The Quest flag** ([game+0x7AE0] bit 31, platform id 3) only changes level names (`_lowspec`), the settings file and LOD. The renderer never reads it.
+
+### Research: Turnip and vkd3d-proton (subagent)
+
+- On Turnip, load and store ops only matter for passes in gmem (`tiledRender=true`). The autotuner picks gmem or sysmem per pass by estimated bandwidth, and forces sysmem for passes with fewer than 5 draws. On a750, `has_generic_clear` turns off skipping empty bins.
+- vkd3d defaults to LOAD and STORE on the `OMSetRenderTargets` path:
+  - CLEAR only when a deferred full-view `ClearRenderTargetView` matches the render area;
+  - DONT_CARE load only after a pending full-resource `DiscardResource`;
+  - DONT_CARE store only through `BeginRenderPass` with ending access DISCARD.
+  - No `VKD3D_CONFIG` flag changes this (`include/private/config_flag_decl.h`).
+- The "16384×16384 att0" passes are draws with no RTV or DSV (UAV-only pixel shaders): the render area falls back to the maximum framebuffer size.
+- Experiments, ranked:
+  1. fewer pixels;
+  2. the FDM layer (if subsampling can be avoided);
+  3. remove Echo's copies;
+  4. `TU_AUTOTUNE_ALGO=profiled` / `prefer_sysmem` / `prefer_gmem`, plus live `TU_DEBUG_FILE` flags (sysmem, gmem, nolrz, forcebin, nobin…);
+  5. `DiscardResource` hooks before full-screen passes that overwrite everything (gmem passes only);
+  6. narrower formats;
+  7. compute and clears;
+  8. LRZ (Echo's stencil compare turns off LRZ writes).
+- Turnip forces gmem for passes with a density map. The FDM black textures are most likely subsampled images sampled through vkd3d's ordinary bindless samplers.
