@@ -269,3 +269,41 @@ All numbers are runtime.log's GPU ms per frame, 1728×1728 per eye, Low preset, 
   7. compute and clears;
   8. LRZ (Echo's stencil compare turns off LRZ writes).
 - Turnip forces gmem for passes with a density map. The FDM black textures are most likely subsampled images sampled through vkd3d's ordinary bindless samplers.
+
+## Offline lobby A/Bs: 90 fps reached (2026-10-02, night)
+
+- **Offline sessions for repeatable tests.** The public lobby emptied out and `/create` sessions die on every restart, so tests now run in an offline session of Echo's own: `frame.py offline [lobby|arena]` (`-offline -level mpl_lobby_b2 -gametype Social_2.0_Private -region uscn`).
+  - The `-offline` flag comes from the EchoRelay patch, loaded by EchoLoader. Echo itself loads `<exe dir>\dbgcore.dll` for its symbol handler.
+  - Under Wine that only works with `WINEDLLOVERRIDES=dbgcore=n,b`, so it's opt-in per launch.
+  - On the Frame: EchoLoader's `dbgcore.dll` in `bin/win10`, the EchoRelay patch as `bin/win10/plugins/dbgcore.dll`, and an `echoloader.json` listing only it. They're copied from the user's own Echo install; they're unlicensed, so they're not in this repo.
+  - Echo logs "[NSLOBBY] creating offline session", loads the social lobby, and our player spawns. There are no other players, and it's the same scene every time. Unattended runs with the headset lying still repeat to ±0.1 ms (base 22.0 at the start and end of a 20-minute run).
+- **The Frame suspends** about an hour after it last saw use, even with Echo running, and drops off Wi-Fi. A logind `sleep` inhibitor needs authentication; an `idle` inhibitor is allowed but doesn't prevent this. Not solved.
+- **Results**, offline lobby, fixed view, GPU ms (runtime.log):
+
+  | config | GPU ms | fps |
+  |---|---|---|
+  | Foveation 2 (base) | 22.0 | 45 Hz |
+  | Foveation 0 | 37.9 | |
+  | JSON `fx 3`, `lights 3`, `sharpening 0`, `qualitylevel 0` | 23.7 (worse: Echo clamps fx and lights to 0–2, so 3 became 2, high) | |
+  | `Patch` mobile feature strip | 22.0 (no change; those features look already off at Low) | |
+  | TAA off + sharpening 0 | 18.2 | |
+  | + particle and light masks 0 (`Poke 20AFB84`, `20AFB80`) | 18.1 | |
+  | + mesh LOD ×4 (`20AFBC8 4`, `20AFBD0 4`, `20AFBD4 10`) | 17.4 | |
+  | + cascadedistance 0.15, DOF flag 0 | 17.4 | |
+  | + Foveation 3 | 16.9 | |
+  | the same at RenderScale 0.8 (with TAA off) | 15.5 | |
+  | **RenderScale 0.7** + all of the above | 11.9–12.1 | 82 fps at 90 Hz |
+  | + LOD ×8 / ×16 | 12.0 / 11.4 | 82 / 86 |
+  | **+ LOD ×50 (`20AFBC8 50`, `20AFBD0 50`, `20AFBD4 100`)** | **9.5** | **90.0, locked** |
+  | `TU_DEBUG=sysmem`, `TU_AUTOTUNE_ALGO=profiled` / `prefer_sysmem` | no change | |
+  | Turnip's live `TU_DEBUG_FILE` flags | no change at all (apparently not picked up) | |
+
+- **Pass timing at RenderScale 0.7** (`PassTiming = 1`, 12.1 ms):
+  - depth prepass, 231 draws, depth only: 2.3 ms (3.2 at full resolution: limited by geometry);
+  - main forward pass, 232 draws, 2 targets + depth: about 5.9 ms;
+  - a 110-draw pass: 1.5 ms;
+  - post effects: 0.2–0.4 ms each.
+  - Copies: the full depth buffer about 2× per frame, an RGBA16F target 1× (`k_resolve_map`), depth to R24X8 1×, the 1280×720 mirror 1×.
+  - So in the lobby the cost is geometry (draws and vertices), which is why the LOD distance pays off.
+- **`frame.py profile 90`** sets RenderScale 0.7, Foveation 3, TAA and sharpening off, `qualitylevel 0`, the masks, LOD ×50 and the strip patch. `frame.py profile default` goes back. **Not yet looked at in the headset:** LOD ×50 may look blocky or drop objects. A milder LOD (×16, 11.4 ms) plus RenderScale 0.65 is the alternative.
+- The eye-gaze action starts ("gaze: eye gaze action ready") and the strip patch applies. Gaze foveation is untested while nobody wears the headset (the gaze is invalid, so it falls back to fixed).
