@@ -13,6 +13,9 @@
   frame.py stop                       ends Echo's session (Echo, its crash reporter, Wine)
   frame.py graphics [KEY=VALUE...]    shows or sets Echo's graphics settings on the Frame (Echo stopped);
                                       "frame" applies the Frame profile (no adaptive res, 72 fps, no MSAA)
+  frame.py ini [KEY=VALUE...]         shows or sets the runtime's echoframe.ini on the Frame; Foveation
+                                      and VelocityLog take effect while Echo runs
+  frame.py timing [LINES]             the latest frame-timing, settings and throw lines of runtime.log
   frame.py wait [SECONDS]             follows a launch until frames flow, Echo crashes or exits
   frame.py logs                       pulls every log into artifacts/logs/<time>/
   frame.py shell CMD...               runs a command in the Frame's shell
@@ -402,6 +405,21 @@ def cmd_graphics(args):
     print("set: " + ", ".join(f"{k}={v}" for k, v in changes.items()))
 
 
+def cmd_ini(args):
+    path = remote_path(BIN) + "/EchoFrame/echoframe.ini"
+    for a in args:
+        k, v = a.split("=", 1)
+        # replace the key's line, or add it; the runtime rereads the file when it changes
+        sh(f"grep -q -i '^{k} *=' '{path}' && sed -i 's/^{k} *=.*/{k} = {v}/I' '{path}' || echo '{k} = {v}' >> '{path}'", check=False)
+    print(sh(f"grep -v -e '^#' -e '^$' '{path}'", check=False), end="")
+
+
+def cmd_timing(args):
+    n = int(args[0]) if args else 12
+    log = remote_path(BIN) + "/EchoFrame/runtime.log"
+    print(sh(f"grep -E 'frames:|  ms:|settings:|throw |foveation: [a-z]+ .Foveation' '{log}' | tail -n {n} | cut -c1-260", check=False), end="")
+
+
 def cmd_logs(args):
     root = remote_path(ROOT)
     home = remote_path("$HOME")
@@ -433,7 +451,7 @@ def main():
         print(__doc__)
         return
     commands = {"recon": cmd_recon, "push-game": cmd_push_game, "install": cmd_install,
-                "launch": cmd_launch, "join": cmd_join, "refresh": cmd_refresh, "stop": cmd_stop, "wait": cmd_wait, "graphics": cmd_graphics, "logs": cmd_logs, "shell": cmd_shell}
+                "launch": cmd_launch, "join": cmd_join, "refresh": cmd_refresh, "stop": cmd_stop, "wait": cmd_wait, "graphics": cmd_graphics, "ini": cmd_ini, "timing": cmd_timing, "logs": cmd_logs, "shell": cmd_shell}
     if sys.argv[1] not in commands:
         sys.exit(f"unknown command {sys.argv[1]}")
     SERIAL = find_frame()

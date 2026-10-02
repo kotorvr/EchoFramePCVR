@@ -8,12 +8,13 @@
 // How: the hooks below see every render-target binding of Echo's command lists
 // (OMSetRenderTargets, BeginRenderPass). Render-target views are recorded when they're created
 // (CreateRenderTargetView, CopyDescriptorsSimple), so the bound target's size is known. A target
-// shaped like one eye's view, or two side by side, at 50-150% of the eye texture's height gets a
+// shaped like one eye's view, or two side by side, at the eye texture's height or half of it gets a
 // shading-rate image: full rate within a cone around each eye's optical axis, 2x2 in a ring
 // outside it, 4x4 (2x2 on level 1) beyond. Any other target gets full rate everywhere.
 // Images are made once per target size and shape.
 //
-// echoframe.ini: Foveation = 0 (off), 1 (light), 2 (medium), 3 (strong). runtime.log lists, for
+// echoframe.ini: Foveation = 0 (off), 1 (light), 2 (medium), 3 (strong). It can be changed while
+// Echo runs, unless it was 0 at the start (then nothing is hooked). runtime.log lists, for
 // the first minutes, the render targets Echo binds and which were foveated.
 #include "efp.h"
 
@@ -34,12 +35,14 @@ namespace {
 typedef void(STDMETHODCALLTYPE* OMSetRenderTargetsFn)(ID3D12GraphicsCommandList*, UINT, const D3D12_CPU_DESCRIPTOR_HANDLE*, BOOL, const D3D12_CPU_DESCRIPTOR_HANDLE*);
 typedef void(STDMETHODCALLTYPE* BeginRenderPassFn)(ID3D12GraphicsCommandList4*, UINT, const D3D12_RENDER_PASS_RENDER_TARGET_DESC*, const D3D12_RENDER_PASS_DEPTH_STENCIL_DESC*, D3D12_RENDER_PASS_FLAGS);
 typedef void(STDMETHODCALLTYPE* CreateRtvFn)(ID3D12Device*, ID3D12Resource*, const D3D12_RENDER_TARGET_VIEW_DESC*, D3D12_CPU_DESCRIPTOR_HANDLE);
+typedef D3D12_RESOURCE_ALLOCATION_INFO*(STDMETHODCALLTYPE* GetResourceAllocationInfoFn)(ID3D12Device*, D3D12_RESOURCE_ALLOCATION_INFO*, UINT, UINT, const D3D12_RESOURCE_DESC*);
 typedef void(STDMETHODCALLTYPE* CopyDescriptorsSimpleFn)(ID3D12Device*, UINT, D3D12_CPU_DESCRIPTOR_HANDLE, D3D12_CPU_DESCRIPTOR_HANDLE, D3D12_DESCRIPTOR_HEAP_TYPE);
 
 OMSetRenderTargetsFn TrueOMSetRenderTargets;
 BeginRenderPassFn TrueBeginRenderPass;
 CreateRtvFn TrueCreateRtv;
 CopyDescriptorsSimpleFn TrueCopyDescriptorsSimple;
+GetResourceAllocationInfoFn TrueGetResourceAllocationInfo;
 
 // What a render-target view points at
 struct Target
@@ -67,6 +70,7 @@ ComPtr<ID3D12GraphicsCommandList> g_ownList;   // keeps a list alive; its vtable
 
 enum Shape : uint8_t { NotEye, OneEye, BothEyes };
 std::map<uint64_t, ComPtr<ID3D12Resource>> g_images;   // (width, height, shape) -> image; null: failed
+std::vector<ComPtr<ID3D12Resource>> g_retired;          // images of an earlier level, maybe still in flight
 
 // Census of what Echo binds, logged for the first minutes
 struct CensusKey
@@ -84,8 +88,10 @@ Shape Classify(const Target& t)
 	if (!e.Width || !e.Height || (t.Flags & (kLayered | kMultisampled)))
 		return NotEye;
 	float eyeAspect = float(e.Width) / e.Height, aspect = float(t.Width) / t.Height;
+	// the eye texture's own size or half of it: other square targets (2048x2048, 1024x1024 in the
+	// lobby) are shadow or reflection maps, not views
 	float scale = float(t.Height) / e.Height;
-	if (scale < 0.5f || scale > 1.5f)
+	if (fabsf(scale - 1.0f) > 0.03f && fabsf(scale - 0.5f) > 0.02f)
 		return NotEye;
 	if (fabsf(aspect / eyeAspect - 1.0f) < 0.03f) return OneEye;
 	if (fabsf(aspect / (2 * eyeAspect) - 1.0f) < 0.03f) return BothEyes;
@@ -202,12 +208,22 @@ ComPtr<ID3D12Resource> MakeImage(UINT width, UINT height, Shape shape)
 // The shading-rate image for a bound target, or null for full rate. Takes g_lock shared.
 ID3D12Resource* ImageFor(D3D12_CPU_DESCRIPTOR_HANDLE rtv)
 {
+	int level = EFP_Foveation();   // echoframe.ini can change it while Echo runs
+	if (level != g_level) {
+		AcquireSRWLockExclusive(&g_lock);
+		if (level != g_level) {
+			for (auto& img : g_images) g_retired.push_back(img.second);
+			g_images.clear();
+			g_level = level;
+		}
+		ReleaseSRWLockExclusive(&g_lock);
+	}
 	AcquireSRWLockShared(&g_lock);
 	auto it = g_targets.find(rtv.ptr);
 	Target t = {};
 	bool known = it != g_targets.end();
 	if (known) t = it->second;
-	Shape shape = known ? Classify(t) : NotEye;
+	Shape shape = known && g_level ? Classify(t) : NotEye;
 	uint64_t key = (uint64_t(t.Width) << 32) | (uint64_t(t.Height) << 8) | shape;
 	ID3D12Resource* image = nullptr;
 	bool make = false;
@@ -302,6 +318,33 @@ void STDMETHODCALLTYPE HookCopyDescriptorsSimple(ID3D12Device* device, UINT coun
 	ReleaseSRWLockExclusive(&g_lock);
 }
 
+// Valve's FDM layer (FDM_DEBUG=enable) makes the eye-sized render targets it gives a density map
+// bigger than the size D3D12 reported for them. Echo places its targets in heaps laid out with the
+// reported sizes, so vkd3d-proton then refuses one ("Heap too small for the texture") and Echo stops
+// with E_INVALIDARG. With the layer on, eye-sized render and depth targets are reported 1/8 bigger.
+bool g_padEyeTargets;
+unsigned g_padded;
+
+D3D12_RESOURCE_ALLOCATION_INFO* STDMETHODCALLTYPE HookGetResourceAllocationInfo(ID3D12Device* device, D3D12_RESOURCE_ALLOCATION_INFO* info,
+                                                                                UINT mask, UINT count, const D3D12_RESOURCE_DESC* descs)
+{
+	TrueGetResourceAllocationInfo(device, info, mask, count, descs);
+	if (!g_padEyeTargets || info->SizeInBytes == UINT64_MAX) return info;
+	for (UINT i = 0; i < count; i++) {
+		const D3D12_RESOURCE_DESC& d = descs[i];
+		if (d.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE2D && d.Width >= 1024 && d.Height >= 512
+		    && (d.Flags & (D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET | D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL))) {
+			UINT64 align = std::max<UINT64>(info->Alignment, 65536);
+			info->SizeInBytes = (info->SizeInBytes + info->SizeInBytes / 8 + align - 1) & ~(align - 1);
+			if (g_padded++ < 8)
+				EFP_Log("fdm: %llux%u target (format %d) reported %llu bytes, for the FDM layer's bigger images", d.Width, d.Height,
+				        (int)d.Format, info->SizeInBytes);
+			break;
+		}
+	}
+	return info;
+}
+
 } // namespace
 
 void EFP_FoveationEye(int eye, int width, int height, float left, float right, float up, float down)
@@ -316,11 +359,29 @@ void EFP_FoveationEye(int eye, int width, int height, float left, float right, f
 	ReleaseSRWLockExclusive(&g_lock);
 }
 
+void EFP_EarlyD3D12()
+{
+	char fdm[128] = "";
+	if (g_padEyeTargets || !GetEnvironmentVariableA("FDM_DEBUG", fdm, sizeof(fdm)) || !strstr(fdm, "enable"))
+		return;
+	typedef HRESULT(WINAPI* CreateDeviceFn)(IUnknown*, D3D_FEATURE_LEVEL, REFIID, void**);
+	HMODULE d3d12 = LoadLibraryW(L"d3d12.dll");
+	CreateDeviceFn create = d3d12 ? (CreateDeviceFn)GetProcAddress(d3d12, "D3D12CreateDevice") : nullptr;
+	static ComPtr<ID3D12Device> device;   // kept: vkd3d-proton hands Echo the same device for the adapter
+	if (!create || FAILED(create(nullptr, D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&device)))) {
+		EFP_Log("fdm: couldn't create a D3D12 device to hook; Echo will likely fail to start with the FDM layer");
+		return;
+	}
+	g_padEyeTargets = true;
+	EFP_HookVirtual(device.Get(), 25, (void*)HookGetResourceAllocationInfo, (void**)&TrueGetResourceAllocationInfo);
+	EFP_Log("fdm: Valve's FDM layer is on (FDM_DEBUG=%s): eye-sized targets are reported bigger", fdm);
+}
+
 void EFP_InstallFoveation(ID3D12Device* device, ID3D12CommandQueue* queue)
 {
 	g_level = EFP_Foveation();
 	if (!g_level) {
-		EFP_Log("foveation: off (Foveation = 0)");
+		EFP_Log("foveation: off (Foveation = 0; it can only be switched on while Echo runs if it wasn't 0 at the start)");
 		return;
 	}
 	if (g_device) return;   // already installed (a second session on the same device)

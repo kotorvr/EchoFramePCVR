@@ -28,6 +28,8 @@ static char g_serial[24];
 static bool g_fp64Dump;
 static bool g_frameTiming = true;
 static int g_foveation = 2;
+static bool g_velocityLog;
+static FILETIME g_settingsTime;          // echoframe.ini's last write time, when it was last read
 
 static FILE* OpenInDir(const wchar_t* name, const wchar_t* mode)
 {
@@ -73,6 +75,7 @@ float EFP_RenderScale() { return g_renderScale; }
 bool EFP_Fp64Dump() { return g_fp64Dump; }
 bool EFP_FrameTiming() { return g_frameTiming; }
 int EFP_Foveation() { return g_foveation; }
+bool EFP_VelocityLog() { return g_velocityLog; }
 
 void EFP_DumpShader(const char* stage, uint64_t hash, const void* code, size_t size)
 {
@@ -106,9 +109,21 @@ const char* EFP_HmdSerial()
 }
 bool EFP_UseHmdCache() { return g_hmdCache; }
 
-// "Key = value" lines; '#' and ';' start comments.
-static void ReadSettings()
+static bool SettingsTime(FILETIME* out)
 {
+	wchar_t path[MAX_PATH];
+	swprintf_s(path, L"%lsechoframe.ini", g_dir);
+	WIN32_FILE_ATTRIBUTE_DATA a;
+	if (!GetFileAttributesExW(path, GetFileExInfoStandard, &a)) return false;
+	*out = a.ftLastWriteTime;
+	return true;
+}
+
+// "Key = value" lines; '#' and ';' start comments. live: Echo is running, so only the keys
+// that can change mid-session are taken (the eye texture size, for one, is fixed by then).
+static void ReadSettings(bool live)
+{
+	SettingsTime(&g_settingsTime);
 	FILE* f = OpenInDir(L"echoframe.ini", L"r");
 	if (!f) return;
 	char line[256];
@@ -116,7 +131,19 @@ static void ReadSettings()
 		char key[64], value[64];
 		if (line[0] == '#' || line[0] == ';' || sscanf_s(line, " %63[^= ] = %63s", key, (unsigned)sizeof(key), value, (unsigned)sizeof(value)) != 2)
 			continue;
-		if (!_stricmp(key, "RenderScale")) {
+		if (!_stricmp(key, "Foveation")) {
+			int level = std::min(3, std::max(0, atoi(value)));
+			if (live && level != g_foveation) EFP_Log("settings: Foveation %d -> %d", g_foveation, level);
+			g_foveation = level;
+		}
+		else if (!_stricmp(key, "VelocityLog")) {
+			bool on = atoi(value) != 0;
+			if (live && on != g_velocityLog) EFP_Log("settings: VelocityLog %d", on ? 1 : 0);
+			g_velocityLog = on;
+		}
+		else if (live)
+			continue;
+		else if (!_stricmp(key, "RenderScale")) {
 			float s = (float)atof(value);
 			if (s >= 0.25f && s <= 2.0f) g_renderScale = s;
 		}
@@ -126,12 +153,21 @@ static void ReadSettings()
 			g_fp64Dump = atoi(value) != 0;
 		else if (!_stricmp(key, "FrameTiming"))
 			g_frameTiming = atoi(value) != 0;
-		else if (!_stricmp(key, "Foveation"))
-			g_foveation = std::min(3, std::max(0, atoi(value)));
 		else if (!_stricmp(key, "HmdSerial"))
 			strncpy_s(g_serial, value, _TRUNCATE);
 	}
 	fclose(f);
+}
+
+void EFP_SettingsPoll()
+{
+	static ULONGLONG last;
+	ULONGLONG now = GetTickCount64();
+	if (now - last < 1000) return;
+	last = now;
+	FILETIME t;
+	if (SettingsTime(&t) && CompareFileTime(&t, &g_settingsTime) != 0)
+		ReadSettings(true);
 }
 
 bool EFP_LoadHmdCache(EFP_HmdCache* out)
@@ -219,10 +255,10 @@ BOOL APIENTRY DllMain(HANDLE module, DWORD reason, LPVOID)
 		if (wchar_t* slash = wcsrchr(g_dir, L'\\')) slash[1] = 0;
 		swprintf_s(g_logPath, L"%lsruntime.log", g_dir);
 		if (FILE* f = OpenInDir(L"runtime.log", L"w")) fclose(f);      // a fresh log per launch
-		ReadSettings();
+		ReadSettings(false);
 		EFP_Log("EchoFramePCVR runtime loaded (LibOVR on OpenXR, ReviveXR)%s", EFP_UnderWine() ? ", under Wine/Proton" : "");
-		EFP_Log("settings: RenderScale %.2f, HmdCache %d, FrameTiming %d, Foveation %d, HmdSerial %s", g_renderScale,
-		        g_hmdCache ? 1 : 0, g_frameTiming ? 1 : 0, g_foveation, EFP_HmdSerial());
+		EFP_Log("settings: RenderScale %.2f, HmdCache %d, FrameTiming %d, Foveation %d, VelocityLog %d, HmdSerial %s", g_renderScale,
+		        g_hmdCache ? 1 : 0, g_frameTiming ? 1 : 0, g_foveation, g_velocityLog ? 1 : 0, EFP_HmdSerial());
 	}
 	return TRUE;
 }
