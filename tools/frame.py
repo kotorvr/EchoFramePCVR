@@ -7,7 +7,7 @@
   frame.py launch                     starts Echo on the Frame (stopping a running one first)
   frame.py stop                       ends Echo's session (Echo, its crash reporter, Wine)
   frame.py graphics [KEY=VALUE...]    shows or sets Echo's graphics settings on the Frame (Echo stopped);
-                                      "frame" applies the Frame profile (no adaptive res, medium, no MSAA)
+                                      "frame" applies the Frame profile (no adaptive res, 72 fps, no MSAA)
   frame.py wait [SECONDS]             follows a launch until frames flow, Echo crashes or exits
   frame.py logs                       pulls every log into artifacts/logs/<time>/
   frame.py shell CMD...               runs a command in the Frame's shell
@@ -268,7 +268,7 @@ def settings_path():
 # Adaptive resolution drops to its floor (0.7) on the Frame's GPU, which looked very blurry; its
 # target was 90 fps on a 72 Hz display. Multi-Res is an NVIDIA feature.
 FRAME_GRAPHICS = {"adaptiveresolution": False, "adaptiverestargetframerate": 72, "resolutionscale": 1.0,
-                  "msaa": 0, "multires": False, "qualitylevel": 2}
+                  "msaa": 0, "multires": False}
 
 
 def cmd_graphics(args):

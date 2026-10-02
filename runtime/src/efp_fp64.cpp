@@ -185,7 +185,7 @@ void EFP_InstallFp64Workaround(ID3D12Device* device)
 		EFP_Log("fp64: the GPU runs double-precision shaders, no workaround needed");
 		return;
 	}
-	EFP_Log(g_lacksFp64 ? "fp64: the GPU has no double-precision shaders: shaders that use them get stubs"
+	EFP_Log(g_lacksFp64 ? "fp64: the GPU has no double-precision shaders: shaders that use them are demoted to single precision (stubbed if they can't be)"
 	                    : "fp64: logging and dumping the shaders that use double precision (Fp64Dump = 1)");
 	EFP_HookVirtual(device, 10, (void*)HookCreateGraphicsPSO, (void**)&TrueCreateGraphicsPSO);
 	EFP_HookVirtual(device, 11, (void*)HookCreateComputePSO, (void**)&TrueCreateComputePSO);
