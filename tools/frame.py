@@ -17,6 +17,8 @@
   frame.py stop                       ends Echo's session (Echo, its crash reporter, Wine)
   frame.py graphics [KEY=VALUE...]    shows or sets Echo's graphics settings on the Frame (Echo stopped);
                                       "frame" applies the Frame profile (no adaptive res, 72 fps, no MSAA)
+  frame.py profile [90|default]      the Frame's 90 Hz setup (resolution, foveation, LODs, TAA off and the
+                                      rest measured in docs/FRAME-NOTES.md), or back to Echo's own look
   frame.py ini [KEY=VALUE...]         shows or sets the runtime's echoframe.ini on the Frame; Foveation
                                       and VelocityLog take effect while Echo runs
   frame.py tudebug [FLAGS]            shows or sets Turnip's live debug flags (e.g. sysmem, gmem, nolrz; "" clears)
@@ -452,6 +454,29 @@ def cmd_ini(args):
     print(sh(f"grep -v -e '^#' -e '^$' '{path}'", check=False), end="")
 
 
+# The 90 Hz profile, from the offline-lobby A/Bs (docs/FRAME-NOTES.md, 2026-10-02 night):
+# RenderScale 0.7 + Foveation 3 + TAA and sharpening off + particle/light quality masks 0 +
+# mesh LOD distance x50 held 90.0 fps at 9.5 ms GPU; Echo's mobile feature strip (Patch) and
+# the masks cost nothing to keep. "default" goes back to Echo's own look.
+PROFILES = {
+    "90": {"graphics": {"temporalaa": False, "sharpening": 0, "qualitylevel": 0},
+           "ini": {"RenderScale": "0.7", "Foveation": "3", "Patch": "5863F7:7434:9090",
+                   "Poke": "20AFB84:i:0,20AFB80:i:0,20AFBC8:f:50.0,20AFBD0:f:50.0,20AFBD4:f:100.0"}},
+    "default": {"graphics": {"temporalaa": True, "sharpening": 2.0, "qualitylevel": 1},
+                "ini": {"RenderScale": "1.0", "Foveation": "2", "Patch": "", "Poke": ""}},
+}
+
+
+def cmd_profile(args):
+    name = args[0] if args else "90"
+    if name not in PROFILES:
+        sys.exit(f"profiles: {', '.join(PROFILES)}")
+    p = PROFILES[name]
+    cmd_graphics([f"{k}={json.dumps(v)}" for k, v in p["graphics"].items()])
+    cmd_ini([f"{k}={v}" for k, v in p["ini"].items()])
+    print(f"profile {name} set; it applies from the next launch")
+
+
 def cmd_tudebug(args):
     if args:
         sh(f"printf '%s\n' '{','.join(args)}' > {TUDEBUG_FILE}", check=False)
@@ -495,7 +520,7 @@ def main():
         print(__doc__)
         return
     commands = {"recon": cmd_recon, "push-game": cmd_push_game, "install": cmd_install,
-                "launch": cmd_launch, "join": cmd_join, "offline": cmd_offline, "refresh": cmd_refresh, "stop": cmd_stop, "wait": cmd_wait, "graphics": cmd_graphics, "ini": cmd_ini, "tudebug": cmd_tudebug, "timing": cmd_timing, "logs": cmd_logs, "shell": cmd_shell}
+                "launch": cmd_launch, "join": cmd_join, "offline": cmd_offline, "refresh": cmd_refresh, "stop": cmd_stop, "wait": cmd_wait, "graphics": cmd_graphics, "ini": cmd_ini, "profile": cmd_profile, "tudebug": cmd_tudebug, "timing": cmd_timing, "logs": cmd_logs, "shell": cmd_shell}
     if sys.argv[1] not in commands:
         sys.exit(f"unknown command {sys.argv[1]}")
     SERIAL = find_frame()
