@@ -4,19 +4,24 @@
 // vkd3d-proton refuses such a shader ("Attempting to use FP64 operations in shader ..., but
 // this is not supported") and the pipeline creation fails with E_INVALIDARG. Echo treats any
 // failed pipeline as fatal ("DirectX error: E_INVALIDARG"). When the device reports no
-// double-precision support, the hooks below swap a vertex, pixel or compute shader that
-// declares doubles (its DXBC/DXIL container's SFI0 feature flags) for a stub, and log each
-// one, so the pipeline exists and Echo carries on: a stubbed vertex shader's draw is clipped
-// away (that object or effect doesn't show), a pixel shader writes zero, a compute shader
-// does nothing. A hull, domain or geometry shader with doubles is passed through (logged). With
-// Fp64Dump = 1 in echoframe.ini every shader that declares doubles is also saved to
-// EchoFrame\shaders\ (on any GPU), to study them.
+// double-precision support, the hooks below give each shader that declares doubles (its
+// container's SFI0 feature flags):
+//   1. its DXIL with the DOUBLE type demoted to FLOAT (efp_dxil.cpp), when that's safe; Echo's
+//      uses are a compiler artifact, so the shader behaves the same;
+//   2. otherwise, or if the pipeline still fails, a stub: a vertex shader whose draw is clipped
+//      away (that effect doesn't show; the pixel shader is stubbed with it), a pixel shader
+//      that writes zero, a compute shader that does nothing.
+// Each shader is logged once. With Fp64Dump = 1 in echoframe.ini, every shader that declares
+// doubles is also saved to EchoFrame/shaders (on any GPU), to study them.
 #include "efp.h"
 
 #include <windows.h>
 #include <d3d12.h>
 #include <stdint.h>
 #include <string.h>
+#include <string>
+#include <unordered_map>
+#include <vector>
 
 #include "stub_ps.h"   // g_StubPS: build\obj, compiled from runtime\shaders by build.cmd
 #include "stub_cs.h"   // g_StubCS
@@ -29,7 +34,6 @@ typedef HRESULT(STDMETHODCALLTYPE* CreateStreamPSO)(ID3D12Device2*, const D3D12_
 static CreateGraphicsPSO TrueCreateGraphicsPSO;
 static CreateComputePSO TrueCreateComputePSO;
 static CreateStreamPSO TrueCreateStreamPSO;
-static LONG g_stubbed;
 static bool g_lacksFp64;   // the device has no double-precision shaders: stub where possible
 
 // D3D_SHADER_REQUIRES_DOUBLES | D3D_SHADER_REQUIRES_11_1_DOUBLE_EXTENSIONS in SFI0
@@ -67,60 +71,99 @@ static uint64_t Hash(const D3D12_SHADER_BYTECODE& code)   // FNV-1a, to name the
 
 static bool UsesDoubles(const D3D12_SHADER_BYTECODE& code) { return (FeatureFlags(code) & kDoubleFlags) != 0; }
 
-static void Note(const char* stage, const D3D12_SHADER_BYTECODE& code, bool stubbed)
+// Per shader (by hash): its demoted copy, or why it couldn't be demoted. Logged once each.
+struct Fixed
 {
-	LONG n = InterlockedIncrement(&g_stubbed);
+	std::vector<uint8_t> code;
+	std::string why;   // empty: demoted
+};
+static SRWLOCK g_lock = SRWLOCK_INIT;
+static std::unordered_map<uint64_t, Fixed> g_fixed;
+
+// The double-free version of a shader: demoted (efp_dxil.cpp), or null if it can't be.
+static const Fixed& Demote(const char* stage, const D3D12_SHADER_BYTECODE& code)
+{
 	uint64_t hash = Hash(code);
-	if (n <= 50)
-		EFP_Log("fp64: %s shader %016llx (%zu bytes) uses double precision%s: %s", stage, (unsigned long long)hash,
-		        code.BytecodeLength, g_lacksFp64 ? ", which this GPU lacks" : "", stubbed ? "replaced with a stub" : "left as is");
-	if (EFP_Fp64Dump())
-		EFP_DumpShader(stage, hash, code.pShaderBytecode, code.BytecodeLength);
+	AcquireSRWLockExclusive(&g_lock);
+	auto it = g_fixed.find(hash);
+	if (it == g_fixed.end()) {
+		Fixed f;
+		if (!EFP_DemoteDxilDoubles(code.pShaderBytecode, code.BytecodeLength, f.code, f.why) && f.why.empty())
+			f.why = "unknown";
+		EFP_Log("fp64: %s shader %016llx (%zu bytes) uses double precision%s: %s%s", stage, (unsigned long long)hash,
+		        code.BytecodeLength, g_lacksFp64 ? ", which this GPU lacks" : "",
+		        !g_lacksFp64 ? "left as is" : f.why.empty() ? "demoted to single precision" : "can't demote (",
+		        !g_lacksFp64 || f.why.empty() ? "" : (f.why + "), stubbed").c_str());
+		if (EFP_Fp64Dump())
+			EFP_DumpShader(stage, hash, code.pShaderBytecode, code.BytecodeLength);
+		it = g_fixed.emplace(hash, std::move(f)).first;
+	}
+	const Fixed& fixed = it->second;   // entries are never removed: the reference stays valid
+	ReleaseSRWLockExclusive(&g_lock);
+	return fixed;
+}
+
+static bool Replace(const char* stage, D3D12_SHADER_BYTECODE& code)
+{
+	if (!UsesDoubles(code)) return true;
+	const Fixed& f = Demote(stage, code);
+	if (!g_lacksFp64) return true;
+	if (!f.why.empty()) return false;
+	code = { f.code.data(), f.code.size() };
+	return true;
+}
+
+static void Stub(D3D12_GRAPHICS_PIPELINE_STATE_DESC& copy)
+{
+	// The draw is clipped away whatever the pixel shader is. The pixel shader becomes the stub
+	// too: vkd3d-proton refuses a pixel shader input the stub vertex shader doesn't output
+	// ("No corresponding output signature element found").
+	copy.VS = { g_StubVS, sizeof(g_StubVS) };
+	copy.PS = { g_StubPS, sizeof(g_StubPS) };
+	copy.HS = copy.DS = copy.GS = {};
 }
 
 static HRESULT STDMETHODCALLTYPE HookCreateGraphicsPSO(ID3D12Device* device, const D3D12_GRAPHICS_PIPELINE_STATE_DESC* desc, REFIID riid, void** out)
 {
-	if (!desc)
+	if (!desc || !(UsesDoubles(desc->VS) || UsesDoubles(desc->PS) || UsesDoubles(desc->HS) || UsesDoubles(desc->DS) || UsesDoubles(desc->GS)))
 		return TrueCreateGraphicsPSO(device, desc, riid, out);
 	D3D12_GRAPHICS_PIPELINE_STATE_DESC copy = *desc;
-	bool changed = false;
-	if (UsesDoubles(desc->VS)) {
-		Note("vertex", desc->VS, g_lacksFp64);
-		if (g_lacksFp64) {
-			// The draw is clipped away whatever the pixel shader is. The pixel shader becomes
-			// the stub too: vkd3d-proton refuses a pixel shader input the stub vertex shader
-			// doesn't output ("No corresponding output signature element found").
-			copy.VS = { g_StubVS, sizeof(g_StubVS) };
-			copy.PS = { g_StubPS, sizeof(g_StubPS) };
-			copy.HS = copy.DS = copy.GS = {};
-			changed = true;
-		}
+	bool ok = Replace("vertex", copy.VS);
+	ok = Replace("pixel", copy.PS) && ok;
+	ok = Replace("hull", copy.HS) && ok;
+	ok = Replace("domain", copy.DS) && ok;
+	ok = Replace("geometry", copy.GS) && ok;
+	if (!g_lacksFp64)
+		return TrueCreateGraphicsPSO(device, desc, riid, out);
+	HRESULT hr = E_FAIL;
+	if (ok) {
+		hr = TrueCreateGraphicsPSO(device, &copy, riid, out);
+		static LONG failures;
+		if (FAILED(hr) && InterlockedIncrement(&failures) <= 10)
+			EFP_Log("fp64: a pipeline with demoted shaders failed (0x%08lx), stubbed", hr);
 	}
-	if (UsesDoubles(desc->PS)) {
-		Note("pixel", desc->PS, g_lacksFp64);
-		if (g_lacksFp64) {
-			copy.PS = { g_StubPS, sizeof(g_StubPS) };
-			changed = true;
-		}
+	if (FAILED(hr)) {
+		copy = *desc;
+		Stub(copy);
+		hr = TrueCreateGraphicsPSO(device, &copy, riid, out);
 	}
-	const struct { const char* name; const D3D12_SHADER_BYTECODE* code; } others[] = {
-		{ "hull", &desc->HS }, { "domain", &desc->DS }, { "geometry", &desc->GS } };
-	for (const auto& s : others)
-		if (UsesDoubles(*s.code)) Note(s.name, *s.code, false);
-	return TrueCreateGraphicsPSO(device, changed ? &copy : desc, riid, out);
+	return hr;
 }
 
 static HRESULT STDMETHODCALLTYPE HookCreateComputePSO(ID3D12Device* device, const D3D12_COMPUTE_PIPELINE_STATE_DESC* desc, REFIID riid, void** out)
 {
-	if (desc && UsesDoubles(desc->CS) && g_lacksFp64) {
-		D3D12_COMPUTE_PIPELINE_STATE_DESC copy = *desc;
-		Note("compute", desc->CS, true);
+	if (!desc || !UsesDoubles(desc->CS))
+		return TrueCreateComputePSO(device, desc, riid, out);
+	D3D12_COMPUTE_PIPELINE_STATE_DESC copy = *desc;
+	bool ok = Replace("compute", copy.CS);
+	if (!g_lacksFp64)
+		return TrueCreateComputePSO(device, desc, riid, out);
+	HRESULT hr = ok ? TrueCreateComputePSO(device, &copy, riid, out) : E_FAIL;
+	if (FAILED(hr)) {
 		copy.CS = { g_StubCS, sizeof(g_StubCS) };
-		return TrueCreateComputePSO(device, &copy, riid, out);
+		hr = TrueCreateComputePSO(device, &copy, riid, out);
 	}
-	if (desc && UsesDoubles(desc->CS))
-		Note("compute", desc->CS, false);
-	return TrueCreateComputePSO(device, desc, riid, out);
+	return hr;
 }
 
 // Pipeline state streams (ID3D12Device2::CreatePipelineState): logged, not changed yet.

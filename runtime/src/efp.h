@@ -40,6 +40,12 @@ void EFP_RestoreVirtual(void** slotAddress, void* original);
 // GPUs without double-precision shaders (the Steam Frame's): stub the pixel and compute
 // shaders that need them instead of letting pipeline creation fail (efp_fp64.cpp).
 struct ID3D12Device;
+#ifdef __cplusplus
+#include <string>
+#include <vector>
+// efp_dxil.cpp: the shader with its DOUBLE type demoted to FLOAT, or false and why not
+bool EFP_DemoteDxilDoubles(const void* code, size_t size, std::vector<uint8_t>& out, std::string& why);
+#endif
 void EFP_InstallFp64Workaround(ID3D12Device* device);
 
 // Frame pacing summary in runtime.log, every 10 s while frames are submitted.

@@ -6,6 +6,8 @@
   frame.py install                    copies build/out/ to it and sets up the Steam shortcut
   frame.py launch                     starts Echo on the Frame (stopping a running one first)
   frame.py stop                       ends Echo's session (Echo, its crash reporter, Wine)
+  frame.py graphics [KEY=VALUE...]    shows or sets Echo's graphics settings on the Frame (Echo stopped);
+                                      "frame" applies the Frame profile (no adaptive res, medium, no MSAA)
   frame.py wait [SECONDS]             follows a launch until frames flow, Echo crashes or exits
   frame.py logs                       pulls every log into artifacts/logs/<time>/
   frame.py shell CMD...               runs a command in the Frame's shell
@@ -256,6 +258,46 @@ def cmd_wait(args):
              f"grep -v -i -E 'password|token|Resetting player|Memory|GPU Memory' \"$L\" | tail -n 8 | cut -c1-170", check=False))
 
 
+# Echo's settings in the shortcut's Wine prefix (the same file as %LOCALAPPDATA%/rad/loneecho/ on Windows) 
+def settings_path():
+    shortcut = sh(f"cat '{remote_path(STATE)}/shortcut.id' 2>/dev/null", check=False).strip()
+    return (f"{remote_path('$HOME')}/.local/share/Steam/steamapps/compatdata/{shortcut}/pfx/drive_c/users/steamuser/"
+            "AppData/Local/rad/loneecho/settings_mp_v2.json")
+
+
+# Adaptive resolution drops to its floor (0.7) on the Frame's GPU, which looked very blurry; its
+# target was 90 fps on a 72 Hz display. Multi-Res is an NVIDIA feature.
+FRAME_GRAPHICS = {"adaptiveresolution": False, "adaptiverestargetframerate": 72, "resolutionscale": 1.0,
+                  "msaa": 0, "multires": False, "qualitylevel": 2}
+
+
+def cmd_graphics(args):
+    path = settings_path()
+    text = sh(f"cat '{path}' 2>/dev/null", check=False)
+    if not text.strip():
+        sys.exit("Echo hasn't written its settings on the Frame yet: launch it once")
+    settings = json.loads(text)
+    graphics = settings.setdefault("graphics", {})
+    if not args:
+        print(json.dumps(graphics, indent=1))
+        return
+    if "yes" in sh("pgrep -f '[e]chovr_openxr.exe' >/dev/null && echo yes", check=False):
+        sys.exit("Echo is running and would overwrite its settings: frame.py stop first")
+    changes = dict(FRAME_GRAPHICS) if args == ["frame"] else {}
+    for a in args:
+        if "=" in a:
+            k, v = a.split("=", 1)
+            changes[k] = json.loads(v) if v not in ("true", "false") else v == "true"
+    graphics.update(changes)
+    local = os.path.join(REPO, "artifacts", "settings_mp_v2.json")
+    os.makedirs(os.path.dirname(local), exist_ok=True)
+    with open(local, "w", encoding="utf-8", newline="\n") as f:
+        json.dump(settings, f, indent=2)
+    sh(f"cp '{path}' '{path}.efp-bak' 2>/dev/null", check=False)
+    push(local, path)
+    print("set: " + ", ".join(f"{k}={v}" for k, v in changes.items()))
+
+
 def cmd_logs(args):
     root = remote_path(ROOT)
     home = remote_path("$HOME")
@@ -287,7 +329,7 @@ def main():
         print(__doc__)
         return
     commands = {"recon": cmd_recon, "push-game": cmd_push_game, "install": cmd_install,
-                "launch": cmd_launch, "stop": cmd_stop, "wait": cmd_wait, "logs": cmd_logs, "shell": cmd_shell}
+                "launch": cmd_launch, "stop": cmd_stop, "wait": cmd_wait, "graphics": cmd_graphics, "logs": cmd_logs, "shell": cmd_shell}
     if sys.argv[1] not in commands:
         sys.exit(f"unknown command {sys.argv[1]}")
     SERIAL = find_frame()
