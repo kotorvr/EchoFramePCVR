@@ -78,3 +78,34 @@ Known before testing, from Proton#10211 and CircuitLord TF2VR #45 (SteamOS "vr" 
 - x86-64 Windows OpenXR apps work through wineopenxr, once the x86-64 MSVC runtime isn't loaded from the prefix's `system32`.
 - The default per-eye size is 1728×1728.
 - Run `/opt/steamvr/bin/linuxarm64/vrcmd --set-settings-int steamvr.powersaveFramesToThrottle=0`; without it SteamVR runs apps at 36 of 72 Hz.
+
+## First play session on the Frame (2026-10-02, after FP64 demotion)
+
+User report: lobby visible, controllers work, playable in the menu space, but:
+
+- **Effects.** About half showed. All six double-precision vertex shaders were demoted to single precision without a fallback, so the rest is probably Echo's own Low preset (`quality.fx 0`, `bloom false`, `volumetrics false`, chosen by Echo for this GPU), not the runtime. Not yet confirmed.
+- **Performance.** Unplayable in the social lobby. The private menu space (level 0xAC36…) held 72 fps for minutes, with the slowest frames around 15 ms.
+  - Entering the social lobby (level 0x3F99…, 19:02:31) brought frames of 100–300 ms. SteamVR then pinned the app at **24 Hz** (one third of 72).
+  - Measured there: the GPU sits at its maximum clock (903 MHz) while Echo's main thread is at about 25% and its task threads around 13%.
+  - So it's GPU-bound, about 40 ms of GPU per frame against a 13.9 ms budget.
+  - Settings at the time: Low preset, TAA on, no MSAA, Multi-Res and adaptive res off, 1728×1728 per eye.
+- **Throttle setting.** `steamvr.powersaveFramesToThrottle` was **1** the whole time. vrcmd takes `steamvr.powersaveFramesToThrottle` and `0` as separate arguments, with `LD_LIBRARY_PATH=/opt/steamvr/bin/linuxarm64`; "key=value" is rejected as "Unknown command". frame.py's `throttle_off` was silently failing; it's fixed and now verified (reads back `=0`).
+- **No settings button.** Bindings come through SteamVR's Touch emulation (`left/right hand bound to /interaction_profiles/oculus/touch_controller`). The session flapped between FOCUSED and VISIBLE, apparently because the menu button opens SteamVR's dashboard.
+  - The runtime offers `XR_VALVE_frame_controller_interaction`. SteamVR's own description of the controller is saved in `docs/frame/frame_controller_profile.json`:
+    - left: `view`, d-pad;
+    - right: `menu`, `a`, `b`, `x`, `y`;
+    - both: `system`, plus trigger, grip and stick (see the file).
+  - Also offered: `XR_EXT_frame_synthesis`, `XR_EXT_frame_composition_report`, `XR_VALVE_timing_utils`.
+
+### Next steps (in order)
+
+1. **GPU and CPU frame timing in runtime.log.** D3D12 timestamp queries on Echo's queue around each frame (WaitToBeginFrame → EndFrame), plus CPU time from xrWaitFrame returning to xrEndFrame. Every tuning step below should be judged by these numbers.
+2. **GPU cost.** A/B in the social lobby:
+   - `RenderScale` 0.7 / 0.6;
+   - TAA off;
+   - Turnip/vkd3d options: `TU_DEBUG=gmem`/`sysmem`, and vkd3d-proton's `VKD3D_CONFIG`;
+   - fewer render passes;
+   - target 36 Hz with SteamVR reprojection (`XR_EXT_frame_synthesis`) if 72 is out of reach.
+3. **Native Frame controller bindings** (`XR_VALVE_frame_controller_interaction`) in the Revive patch. The Echo menu goes on the left `view` button, so the right `menu`/`system` stays SteamVR's. Log the bound profile.
+4. **Effects.** Compare in the headset against the PC at the same Low preset to separate missing-by-preset from missing-by-bug. Check `Fp64Dump` for any shader stubbed instead of demoted.
+5. **Later:** mic and voice chat check, a full match, a one-click installer, Echo Arcade.

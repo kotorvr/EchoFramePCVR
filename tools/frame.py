@@ -29,7 +29,7 @@ ROOT = "$HOME/EchoVR/ready-at-dawn-echo-arena"
 BIN = ROOT + "/bin/win10"
 STATE = "$HOME/EchoVR/efp"                  # the shortcut id and helper scripts on the Frame
 NAME = "Echo VR (PCVR)"
-VRCMD = "XDG_RUNTIME_DIR=/run/user/$(id -u) /opt/steamvr/bin/linuxarm64/vrcmd"
+VRCMD = "export XDG_RUNTIME_DIR=/run/user/$(id -u) LD_LIBRARY_PATH=/opt/steamvr/bin/linuxarm64; /opt/steamvr/bin/linuxarm64/vrcmd"
 # Proton writes $HOME/steam-<game id>.log with PROTON_LOG=1
 LAUNCH_OPTIONS = "PROTON_LOG=1 %command%"
 
@@ -91,7 +91,13 @@ def remote_path(path):
 
 
 def throttle_off():
-    sh(f"{VRCMD} --set-settings-int steamvr.powersaveFramesToThrottle=0 >/dev/null 2>&1", check=False)
+    """SteamOS's power-save profile makes SteamVR throttle apps (steamvr.powersaveFramesToThrottle
+    = 1, found set on the Frame). vrcmd takes the key and the value as separate arguments
+    ("section.key=value" is "Unknown command") and needs its own folder on LD_LIBRARY_PATH."""
+    out = sh(f"{VRCMD} --set-settings-int steamvr.powersaveFramesToThrottle 0 2>&1 | tail -1; "
+             f"{VRCMD} --settings-int steamvr.powersaveFramesToThrottle 2>&1 | tail -1", check=False)
+    if "=0" not in out:
+        print(f"warning: couldn't turn SteamVR's power-save throttling off: {out.strip()[-160:]}")
 
 
 def steam(*args, timeout=60):
